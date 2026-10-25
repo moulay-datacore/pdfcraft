@@ -333,6 +333,13 @@ fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static 
         ui.add_space(6.0);
     }
     // Format text at the top while text is selected or being added.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ui.checkbox(&mut app.match_installed_fonts, tl!("Use matching fonts installed on this computer"));
+        if app.match_installed_fonts {
+            ui.label(tl!("Only fonts permitting editable embedding are used. You are responsible for the font licence when sharing the PDF."));
+        }
+    }
     format_section(app, ui, t);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         widgets::section_title(ui, tl!("Modify page"));
@@ -540,7 +547,13 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             .map(|f| (f.resource, f.face))
             .collect();
         let shown = ed.font_shown(&sources);
-        let out = crate::format_text_ui::panel(ui, t, &mut ed.look, Some(&mut ed.extras), Fonts { sources: Some(&sources), shown });
+        let out = crate::format_text_ui::panel(
+            ui,
+            t,
+            &mut ed.look,
+            Some(&mut ed.extras),
+            Fonts { sources: Some(&sources), shown, installed: app.match_installed_fonts },
+        );
         let mut changed = out.changed;
         match out.font {
             Some(FontChoice::KeepSource) => {
@@ -620,7 +633,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
 /// Format text for added text: the standard families, size, colour, style and alignment.
 fn added_text_format(ui: &mut egui::Ui, t: &Tokens, style: &mut pdfcraft_engine::AddedText) {
     let shown = style.family.label().to_string();
-    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown });
+    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown, installed: false });
     if let Some(crate::format_text_ui::FontChoice::Family(family)) = out.font {
         style.family = family;
     }

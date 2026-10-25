@@ -426,6 +426,8 @@ pub struct Document {
     trust: Arc<TrustStore>,
     sig_cache: Arc<pdfcraft_sign::DigestCache>,
     editor: Option<Editor>,
+    text_fonts: Option<Arc<text_fonts::Catalogue>>,
+    text_font_preview: std::sync::Mutex<Option<text_preview::PreparedFonts>>,
     config: RenderConfig,
     /// What field scripts printed or asked for (see [`Session::take_js_output`]).
     js_output: js::JsOutput,
@@ -445,6 +447,8 @@ pub struct Document {
     /// What the last successful [`Session::apply`] wrote that its fonts can't draw: kept as typed,
     /// drawn with `?` in its place (see [`TextNotice`]). The interface shows it; tools return it.
     pub edit_notices: Vec<TextNotice>,
+    /// Installed faces registered by the latest successful paragraph edit.
+    pub installed_completions: Vec<String>,
 }
 
 /// Text an edit stored as typed but drew with `?` in place of `ch`, because the font it is drawn
@@ -2455,6 +2459,8 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
 
 /// Dates and unique ids stamped onto what an edit creates.
 struct EditCtx {
+    text_fonts: Option<Arc<text_fonts::Catalogue>>,
+    installed_completions: Vec<String>,
     /// Field scripts run (`None`: JavaScript is off) and what they produced.
     js: Option<js::JsRunner>,
     /// A laid-out XFA form's template (`None`: not an XFA form, or JavaScript is off) and what
@@ -2494,6 +2500,8 @@ impl EditCtx {
             seed ^= std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(0) << 32;
         }
         Self {
+            text_fonts: None,
+            installed_completions: Vec::new(),
             js: None,
             xfa: None,
             xfa_out: Default::default(),
@@ -2818,6 +2826,9 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         }
         Edit::MoveObjects { page, objects, offset } => pdfcraft_edit::move_objects(doc, *page, objects, *offset)?,
         Edit::EditTextBlock { page, block, text, style } => {
+            if let Some(fonts) = &cx.text_fonts {
+                cx.installed_completions = fonts.complete(doc, *page, *block, text, style)?;
+            }
             pdfcraft_edit::rewrite_block(doc, *page, *block, Some(text), style)?;
         }
         Edit::RegisterTextFont { page, bytes, grant } => {
@@ -3225,6 +3236,7 @@ impl From<pdfcraft_sign::SignError> for EditError {
 #[derive(Default)]
 pub struct Session {
     docs: Vec<Document>,
+    text_fonts: Option<Arc<text_fonts::Catalogue>>,
     next_id: u64,
     /// Seconds since the Unix epoch, injected so saves are deterministic in tests.
     clock: Option<fn() -> i64>,
@@ -3665,6 +3677,7 @@ impl Session {
         let id = DocId(self.next_id);
         let mut document = prepared.document;
         document.id = id;
+        document.text_fonts = self.text_fonts.clone();
         self.docs.push(document);
         id
     }
@@ -3938,6 +3951,8 @@ impl Session {
             trust: trust.clone(),
             sig_cache,
             editor,
+            text_fonts: None,
+            text_font_preview: Default::default(),
             config,
             js_output: Default::default(),
             xfa,
@@ -3946,6 +3961,7 @@ impl Session {
             fonts_stale: false,
             xfa_warnings: Vec::new(),
             edit_notices: Vec::new(),
+            installed_completions: Vec::new(),
         }
     }
 
@@ -3960,6 +3976,7 @@ impl Session {
         let js_off = self.js_off;
         let doc = self.doc_mut(id)?;
         doc.edit_notices.clear();
+        doc.installed_completions.clear();
         let name = doc.name.clone();
         let is_xfa = doc.info.xfa.is_some();
         let mut scope = scope_of(&edit);
@@ -3967,6 +3984,7 @@ impl Session {
         if !js_off {
             cx.xfa = doc.xfa_template.clone();
         }
+        cx.text_fonts = doc.text_fonts.clone();
         cx.pages = doc.info.pages.len();
         cx.today = today;
         let reason = doc.read_only_reason.clone().unwrap_or_default();
@@ -4138,6 +4156,7 @@ impl Session {
         doc.dirty = true;
         doc.generation += 1;
         doc.edit_notices = notices;
+        doc.installed_completions = cx.installed_completions;
         if !cx.xfa_removed.is_empty() {
             let removed: Vec<String> = cx.xfa_removed.iter().map(|n| format!("{XFA_REMOVED_PREFIX}{n}")).collect();
             doc.xfa_warnings.retain(|w| w.starts_with(XFA_REMOVED_PREFIX));
@@ -4183,6 +4202,7 @@ impl Session {
             return Err(e);
         }
         doc.edit_notices.clear();
+        doc.installed_completions.clear();
         Self::sync_dirty(doc);
         doc.generation += 1;
         Ok(label)
@@ -4212,6 +4232,7 @@ impl Session {
             return Err(e);
         }
         doc.edit_notices.clear();
+        doc.installed_completions.clear();
         Self::sync_dirty(doc);
         doc.generation += 1;
         Ok(label)

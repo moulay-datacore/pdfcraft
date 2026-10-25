@@ -163,6 +163,41 @@ pub fn register_text_font(doc: &mut Document, page: usize, bytes: &[u8], grant: 
     Ok(name)
 }
 
+/// Missing characters in each source face, for an installed-font catalogue to complete.
+/// Existing encodable glyphs and explicitly selected replacement faces need no discovery.
+pub fn missing_source_glyphs(doc: &Document, page: usize, block: usize, text: &str, style: &BlockStyle) -> Result<Vec<(String, String)>, EditError> {
+    if text.len() > 262_144 {
+        return Err(EditError::Invalid("the replacement text exceeds 256 KiB".into()));
+    }
+    if style.resource.is_some() || style.family.is_some() || style.bold.is_some() {
+        return Ok(Vec::new());
+    }
+    let lines = text_lines(doc, page)?;
+    let blocks = group_blocks(&lines);
+    let block = blocks.get(block).ok_or_else(|| EditError::Invalid("text block does not exist".into()))?;
+    // These paths do not consume mixed page-font resources yet; do not register or report
+    // a face that the rewrite would replace with its existing single-face fallback.
+    if text.chars().any(crate::bidi::is_hebrew) || block.lines.iter().filter_map(|i| lines.get(*i)).any(|line| !line.upright() || line.visual_order) {
+        return Ok(Vec::new());
+    }
+    let p = page_dict(doc, page)?;
+    let resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();
+    let fonts = resources.get(b"Font").and_then(|o| doc.dict(o)).unwrap_or_default();
+    let metrics: Vec<_> = fonts.iter().take(256).filter_map(|(_, f)| doc.dict(f).map(|f| Metrics::from_dict(doc, &f))).collect();
+    let characters: std::collections::BTreeSet<_> = text.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
+    let mut needs = std::collections::BTreeMap::new();
+    for line in block.lines.iter().filter_map(|i| lines.get(*i)) {
+        let key = pdfcraft_fonts::embedding::face_key(&line.base_font);
+        if needs.contains_key(&key) {
+            continue;
+        }
+        let peers: Vec<_> = metrics.iter().filter(|m| pdfcraft_fonts::embedding::same_face_name(&m.base_font, &line.base_font)).collect();
+        let missing: String = characters.iter().copied().filter(|c| !peers.iter().any(|m| source_encodes(m, &c.to_string()))).collect();
+        needs.insert(key, (line.base_font.clone(), missing));
+    }
+    Ok(needs.into_values().filter(|(_, missing)| !missing.is_empty()).collect())
+}
+
 /// Read-only draft bounds, measured with the same PDF rewrite used by Apply/Save.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextEditLayout {

@@ -30,10 +30,23 @@ they can draw all of it, and the bundled Inter face (`assets/fonts`) for the Lat
 Cyrillic letters they lack (Uzbek `қизил`, Kazakh `әже`): that face needs no build input, so
 these work in every build, the web one included. Choosing another face
 is explicit. Fonts with restricted embedding, unsupported collections, excluded families or
-no open-licence declaration are refused. The engine and the automation tools (`installed: true`)
-can opt in to installed fonts instead: a font without an open-licence declaration is then
+no open-licence declaration are refused. The desktop Format panel offers **Use matching fonts installed on this computer**, persisted
+and off by default. Paragraph automation calls `text_edit` and `text_edit_layout` opt in per call
+with `installed: true`. With this grant, a font without an open-licence declaration is then
 accepted when its OS/2 `fsType` permits editable embedding, and the user answers for its
 licence when sharing the PDF (#2077). Interface fallback fonts are never exported.
+
+Based on #1267 by @komo1iddin (Refs #2077), discovery caches a bounded snapshot of eligible
+standalone font bytes off the desktop UI thread. Exact PostScript matches are preferred, then
+matching family, weight and italic names; another family never completes a subset. Existing
+glyphs retain the source resource; only missing glyphs use the registered full face. Completion
+and text are one undo step. The UI reports the face “from this computer”; automation returns
+`installed_completions` for the requested paragraph (including layout previews). Automation scans
+only its permitted read root when confined. Collections (`.ttc`), variable instances and ambiguous
+or unrecognized style names remain unsupported. Turned text, Hebrew and visual-order Indic
+rewrites retain their existing single-face behavior and do not register or report installed completion. Discovery retains the 4096-entry, four-level,
+64 MiB read budget and 16 MiB file cap. macOS includes `/System/Library/Fonts` and `Supplemental`.
+
 
 The full selected program, glyph mappings, widths and Unicode text are embedded in the PDF.
 Saving and reopening therefore needs no locally installed font. Editing the same text again

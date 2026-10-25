@@ -586,9 +586,9 @@ pub(super) fn rewrite_styled_block(
                 resource.clone()
             } else if metrics.get(&source.font).is_some_and(|m| source_encodes(m, &s)) {
                 source.font.clone()
-            } else if let Some((name, _)) = metrics.iter().find(|(_, m)| {
-                pdfcraft_fonts::embedding::face_key(&m.base_font) == pdfcraft_fonts::embedding::face_key(&source.base_font) && source_encodes(m, &s)
-            }) {
+            } else if let Some((name, _)) =
+                metrics.iter().find(|(_, m)| pdfcraft_fonts::embedding::same_face_name(&m.base_font, &source.base_font) && source_encodes(m, &s))
+            {
                 name.clone()
             } else if let Some(face) =
                 pdfcraft_fonts::embedding::matching_faces(&source.base_font).into_iter().find(|f| pdfcraft_fonts::embedding::covers(f.bytes, &s))

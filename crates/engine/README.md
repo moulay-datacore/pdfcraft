@@ -93,3 +93,8 @@ family (`sign`, `sign_with_timestamp`, `timestamp_document`, `embed_ltv`).
 `doc.text_edit_preview(page, block)` prepares a read-only page background with the selected
 paragraph’s glyphs removed, preserving text positioning, images and colours. It shares the
 working document’s render configuration and never enters the undo history.
+
+Installed subset completion (Refs #2077, based on #1267 by @komo1iddin) uses an immutable,
+bounded `text_fonts::Catalogue` snapshot. Frontends opt in explicitly; paragraph automation
+uses `installed: true` on each call and reports `installed_completions`. Font bytes are
+registered inside the text transaction; L4 performs no filesystem reads. Collections remain unsupported.

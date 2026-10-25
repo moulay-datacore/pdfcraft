@@ -2806,3 +2806,9 @@ certificate	Version	Version
 # Date picker: Today button (#4274) (AI-assisted, not separately native-reviewed)
 	Today	Aujourd'hui
 @plural	{n} reply|{n} replies	{n} réponse|{n} réponses
+
+# Installed font completion (#2077)
+	Use matching fonts installed on this computer	Utiliser les polices correspondantes installées sur cet ordinateur
+	Only fonts permitting editable embedding are used. You are responsible for the font licence when sharing the PDF.	Seules les polices autorisant l’incorporation modifiable sont utilisées. Vous êtes responsable de leur licence lors du partage du PDF.
+	from this computer	de cet ordinateur
+	No eligible document fonts found. Load a font file.	Aucune police de document admissible trouvée. Charger un fichier de police.

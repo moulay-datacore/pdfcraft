@@ -183,6 +183,12 @@ impl PdfCraftApp {
                 if let Some(n) = self.session.get(id).and_then(|d| d.edit_notices.first()).cloned() {
                     self.notify(crate::content_ui::undrawn_message(&n));
                 }
+                if let Some(doc) = self.session.get(id) {
+                    let fonts = doc.installed_completions.join(", ");
+                    if !fonts.is_empty() {
+                        self.notify(format!("{} {}", fonts, tl!("from this computer")));
+                    }
+                }
                 let out = self.session.take_js_output(id);
                 self.handle_js(id, out);
                 true

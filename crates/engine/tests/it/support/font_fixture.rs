@@ -29,6 +29,9 @@ fn index(items: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 pub fn cff_font() -> Vec<u8> {
+    named_font("Rect Font", "RectFont-Regular", 0, false)
+}
+pub fn named_font(family: &str, face: &str, fs_type: u16, extra: bool) -> Vec<u8> {
     let name = index(&[b"RectFont".to_vec()]);
     let mut dict = Vec::new();
     for n in [0, 0, 500, 700] {
@@ -80,15 +83,20 @@ pub fn cff_font() -> Vec<u8> {
     be32(&mut cmap, 12);
     be16(&mut cmap, 12);
     be16(&mut cmap, 0);
-    be32(&mut cmap, 40);
+    be32(&mut cmap, if extra { 52 } else { 40 });
     be32(&mut cmap, 0);
-    be32(&mut cmap, 2);
+    be32(&mut cmap, if extra { 3 } else { 2 });
     for (cp, gid) in [(32, 1), (65, 2)] {
         be32(&mut cmap, cp);
         be32(&mut cmap, cp);
         be32(&mut cmap, gid);
     }
-    let names = [(1, "Rect Font"), (2, "Regular"), (6, "RectFont-Regular"), (13, "MIT License")];
+    if extra {
+        for n in [66, 66, 2] {
+            be32(&mut cmap, n);
+        }
+    }
+    let names = [(1, family), (2, "Regular"), (6, face), (13, "MIT License")];
     let mut name = Vec::new();
     be16(&mut name, 0);
     be16(&mut name, names.len() as u16);
@@ -102,9 +110,22 @@ pub fn cff_font() -> Vec<u8> {
         data.extend(bytes);
     }
     name.extend(data);
-    let tables = [(*b"CFF ", cff), (*b"cmap", cmap), (*b"head", head), (*b"hhea", hhea), (*b"hmtx", hmtx), (*b"maxp", maxp), (*b"name", name)];
+    let mut os2 = vec![0; 96];
+    os2[0..2].copy_from_slice(&4u16.to_be_bytes());
+    os2[4..6].copy_from_slice(&400u16.to_be_bytes());
+    os2[8..10].copy_from_slice(&fs_type.to_be_bytes());
+    let tables = [
+        (*b"OS/2", os2),
+        (*b"CFF ", cff),
+        (*b"cmap", cmap),
+        (*b"head", head),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"maxp", maxp),
+        (*b"name", name),
+    ];
     let mut out = b"OTTO".to_vec();
-    be16(&mut out, 7);
+    be16(&mut out, 8);
     be16(&mut out, 64);
     be16(&mut out, 2);
     be16(&mut out, 48);

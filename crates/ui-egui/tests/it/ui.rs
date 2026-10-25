@@ -1862,3 +1862,15 @@ fn full_screen_neither_is_remembered_nor_hides_the_last_view() {
     view.leave_presentation();
     assert_eq!((view.fit, view.zoom, view.layout, view.continuous), (Fit::None, 0.5, PageLayout::TwoUp, false), "the remembered view");
 }
+
+#[test]
+fn matching_installed_fonts_is_off_by_default_and_persisted() {
+    let mut a = PdfCraftApp::new();
+    assert!(!a.match_installed_fonts);
+    a.match_installed_fonts = true;
+    let mut b = PdfCraftApp::new();
+    b.restore(&a.persist());
+    assert!(b.match_installed_fonts);
+    b.restore("{\"match_installed_fonts\":\"invalid\"}");
+    assert!(!b.match_installed_fonts);
+}

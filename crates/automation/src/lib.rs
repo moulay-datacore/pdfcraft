@@ -117,6 +117,7 @@ const FIND_MAX_WARNING_BYTES: usize = 1024;
 pub struct Automation {
     session: Session,
     root: Option<PathBuf>,
+    installed_catalogue: Option<Arc<pdfcraft_engine::text_fonts::Catalogue>>,
     /// The read and write folders of `--automation-read-root` / `--automation-write-root`.
     roots: Option<Arc<file_access::AutomationRoots>>,
     /// Synchronous renderers, rebuilt when a document's working bytes change.
@@ -142,6 +143,7 @@ impl Automation {
         Self {
             session: Session::new(),
             root: None,
+            installed_catalogue: None,
             roots: None,
             renderers: HashMap::new(),
             texts: TextCache::default(),
@@ -150,12 +152,37 @@ impl Automation {
         }
     }
 
+    fn prepare_matching_fonts(&mut self, a: &Args<'_>) -> Result<()> {
+        if !a.opt_bool("installed")?.unwrap_or(false) {
+            self.session.clear_text_font_catalogue();
+            return Ok(());
+        }
+        if self.installed_catalogue.is_none() {
+            let roots = if let Some(roots) = &self.roots {
+                let read = roots.read_root().ok_or_else(|| failed("installed fonts require read authority"))?;
+                vec![self.resolve(&read.to_string_lossy(), false)?]
+            } else if let Some(root) = &self.root {
+                vec![root.clone()]
+            } else {
+                pdfcraft_engine::text_fonts::installed_directories()
+            };
+            self.installed_catalogue =
+                Some(Arc::new(pdfcraft_engine::text_fonts::Catalogue::discover(&roots, pdfcraft_engine::FontGrant::InstalledEmbeddable)));
+        }
+        if let Some(fonts) = &self.installed_catalogue {
+            self.session.set_text_font_catalogue(fonts.clone());
+        }
+        Ok(())
+    }
+
     /// Confine every path the tools read or write to `root` (relative paths resolve inside it).
     pub fn with_root(mut self, root: impl Into<PathBuf>) -> std::io::Result<Self> {
         let root = root.into().canonicalize()?;
         if !root.is_dir() {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "the root must be a folder"));
         }
+        self.installed_catalogue = None;
+        self.session.clear_text_font_catalogue();
         self.root = Some(root);
         Ok(self)
     }
@@ -164,6 +191,8 @@ impl Automation {
     /// root (`None`: no confinement). Applies on top of [`with_root`](Self::with_root) when both
     /// are set.
     pub fn with_automation_roots(mut self, roots: Option<Arc<file_access::AutomationRoots>>) -> Self {
+        self.installed_catalogue = None;
+        self.session.clear_text_font_catalogue();
         self.roots = roots;
         self
     }
@@ -663,6 +692,7 @@ impl Automation {
                 json!({"fonts": self.doc(&a)?.text_editor_fonts(page).into_iter().map(|f| json!({"resource":f.resource,"font":f.face,"full_face":f.resource.starts_with("PCFull"),"preview_only":f.resource.starts_with("PCApproved")})).collect::<Vec<_>>()})
             }
             "text_edit_layout" => {
+                self.prepare_matching_fonts(&a)?;
                 let page = self.page(&a)?;
                 let doc = self.doc(&a)?;
                 let k = a.int("paragraph")?;
@@ -686,9 +716,10 @@ impl Automation {
                 };
                 let fonts: Vec<_> = doc.text_editor_fonts(page).into_iter().map(|f| json!({"resource": f.resource, "face": f.face})).collect();
                 json!({ "page": page + 1, "paragraph": k, "source_rect": view_rect(layout.source_rect),
-                    "draft_rect": layout.draft_rect.map(view_rect), "overflow": layout.overflow, "embedded_fonts": fonts })
+                    "draft_rect": layout.draft_rect.map(view_rect), "overflow": layout.overflow, "embedded_fonts": fonts, "installed_completions": doc.matching_font_completions(page, index, text, &style).map_err(failed)? })
             }
             "text_edit" if a.get("paragraph").is_some() => {
+                self.prepare_matching_fonts(&a)?;
                 let page = self.page(&a)?;
                 let k = a.int("paragraph")?;
                 let (id, blocks) = {
@@ -741,6 +772,7 @@ impl Automation {
                 let wanted: String = text.split_whitespace().collect();
                 let mut out = self.apply(&a, Edit::EditTextBlock { page, block: index, text, style })?;
                 let doc = self.doc(&a)?;
+                out["installed_completions"] = json!(doc.installed_completions);
                 let after = doc.text_blocks(page);
                 // Without `text` the paragraph keeps the document's own words: not echoed when
                 // the document doesn't allow copying them.

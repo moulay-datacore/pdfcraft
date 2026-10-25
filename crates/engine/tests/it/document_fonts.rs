@@ -96,3 +96,106 @@ fn contextual_arabic_marks_ligatures_and_mixed_bidi_keep_logical_text_after_reop
     }
     exercise(font.bytes.to_vec(), "سَلَام 123", "NotoSansArabic-Regular");
 }
+
+// Based on #1267 by @komo1iddin: cached completion, atomic undo and portable save/reopen.
+#[test]
+fn matching_installed_subset_completion_is_atomic_and_portable() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-matching-synthetic-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("face.otf"), support::font_fixture::named_font("Rect Font", "RectFont", 0, true)).unwrap();
+    let fonts = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
+    assert_eq!(fonts.files().count(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let source = support::source_subset::source_subset();
+    let mut s = Session::new();
+    let id = s.open("source.pdf", None, source.clone(), None).unwrap();
+    s.set_text_font_catalogue(fonts);
+    let style = BlockStyle::default();
+    assert_eq!(s.get(id).unwrap().matching_font_completions(0, 0, "AB", &style).unwrap(), vec!["RectFont"]);
+    s.get(id).unwrap().text_edit_layout(0, 0, "AB", &style).unwrap();
+    assert!(!s.get(id).unwrap().dirty);
+    s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "AB".into(), style }).unwrap();
+    let doc = s.get(id).unwrap();
+    assert_eq!(doc.installed_completions, vec!["RectFont"]);
+    let lines = doc.text_lines(0);
+    assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<String>(), "AB");
+    assert!(lines.iter().all(|l| pdfcraft_fonts::embedding::same_face_name(&l.base_font, "RectFont-Regular")));
+    let saved = s.save_bytes(id).unwrap();
+    let cos = Document::open(saved.clone()).unwrap();
+    let page = pdfcraft_model::pages(&cos).remove(0);
+    let resources = cos.dict(page.dict.get(b"Resources").unwrap()).unwrap();
+    let fonts = cos.dict(resources.get(b"Font").unwrap()).unwrap();
+    fn contents(cos: &Document, object: &Object) -> Vec<u8> {
+        let object = cos.resolve(object);
+        match object.as_ref() {
+            Object::Stream(s) => s.decoded().unwrap(),
+            Object::Array(a) => a.iter().flat_map(|o| contents(cos, o)).collect(),
+            _ => Vec::new(),
+        }
+    }
+    let mut font = String::new();
+    let mut source_text = String::new();
+    let mut completed_text = String::new();
+    for op in pdfcraft_content::parse(&contents(&cos, page.dict.get(b"Contents").unwrap())).ops {
+        if op.op == b"Tf" {
+            font = String::from_utf8(op.operands[0].as_name().unwrap().to_vec()).unwrap();
+        }
+        let strings: Vec<_> = if op.op == b"Tj" {
+            op.operands.iter().collect()
+        } else if op.op == b"TJ" {
+            op.operands[0].as_array().unwrap().iter().collect()
+        } else {
+            Vec::new()
+        };
+        for object in strings {
+            if let Some(text) = object.as_string() {
+                let metrics = pdfcraft_fonts::pdf::Metrics::from_dict(&cos, &cos.dict(fonts.get(font.as_bytes()).unwrap()).unwrap());
+                let text = metrics.decode(&text.bytes);
+                if font == "F1" {
+                    source_text.push_str(&text);
+                } else {
+                    completed_text.push_str(&text);
+                }
+            }
+        }
+    }
+    assert_eq!(source_text, "A");
+    assert_eq!(completed_text, "B");
+    let mut reopened = Session::new();
+    let rid = reopened.open("saved.pdf", None, saved, None).unwrap();
+    assert_eq!(reopened.get(rid).unwrap().text_blocks(0)[0].text, "AB");
+    s.undo(id).unwrap();
+    assert_eq!(s.get(id).unwrap().bytes, source);
+    assert!(s.get(id).unwrap().can_undo().is_none());
+}
+
+#[test]
+fn installed_subset_completion_requires_opt_in_same_family_and_editable_embedding() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    for (label, family, face, permission, opt_in) in [
+        ("off", "Rect Font", "RectFont-Regular", 0, false),
+        ("other", "Other", "Other-Regular", 0, true),
+        ("restricted", "Rect Font", "RectFont-Regular", 2, true),
+        ("preview", "Rect Font", "RectFont-Regular", 4, true),
+    ] {
+        let dir = std::env::temp_dir().join(format!("pdfcraft-matching-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("font.otf"), support::font_fixture::named_font(family, face, permission, true)).unwrap();
+        let fonts = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
+        if permission != 0 {
+            assert_eq!(fonts.files().count(), 0);
+        }
+        let mut s = Session::new();
+        let id = s.open("source.pdf", None, support::source_subset::source_subset(), None).unwrap();
+        if opt_in {
+            s.set_text_font_catalogue(fonts);
+        }
+        assert!(s.get(id).unwrap().matching_font_completions(0, 0, "AB", &BlockStyle::default()).unwrap().is_empty(), "{label}");
+        s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "AB".into(), style: BlockStyle::default() }).unwrap();
+        assert!(s.get(id).unwrap().installed_completions.is_empty(), "{label}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

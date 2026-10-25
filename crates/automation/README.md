@@ -229,3 +229,8 @@ behavior. Back/Forward
 returns to page tops, does not restore zoom, does not switch documents, and is not saved across
 restarts. Standalone engine/MCP sessions have no viewport, so they do not have a separate
 navigation-history tool; use the opt-in UI control channel to navigate the displayed document.
+
+Installed subset completion (Refs #2077, based on #1267 by @komo1iddin) uses an immutable,
+bounded `text_fonts::Catalogue` snapshot. Frontends opt in explicitly; paragraph automation
+uses `installed: true` on each call and reports `installed_completions`. Font bytes are
+registered inside the text transaction; L4 performs no filesystem reads. Collections remain unsupported.

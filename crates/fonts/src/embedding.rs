@@ -16,6 +16,43 @@ pub fn face_key(name: &str) -> String {
     name.rsplit('+').next().unwrap_or(name).chars().filter(char::is_ascii_alphanumeric).flat_map(char::to_lowercase).collect()
 }
 
+/// Family and explicit style encoded by a PDF PostScript name. No cross-family aliases.
+/// Used only after exact `face_key` matching; unknown suffixes stay part of the family.
+pub fn face_identity(name: &str) -> (String, u16, bool) {
+    let mut key = face_key(name);
+    for suffix in ["psmt", "mt", "ps"] {
+        if let Some(family) = key.strip_suffix(suffix) {
+            key = family.to_owned();
+            break;
+        }
+    }
+    let italic = key.ends_with("italic") || key.ends_with("oblique");
+    for suffix in ["italic", "oblique"] {
+        if let Some(family) = key.strip_suffix(suffix) {
+            key = family.to_owned();
+            break;
+        }
+    }
+    let mut weight = 400;
+    for (suffix, value) in
+        [("semibold", 600), ("demibold", 600), ("extrabold", 800), ("bold", 700), ("black", 900), ("medium", 500), ("light", 300), ("regular", 400)]
+    {
+        if let Some(family) = key.strip_suffix(suffix) {
+            key = family.to_owned();
+            weight = value;
+            break;
+        }
+    }
+    (key, weight, italic)
+}
+
+/// Exact PostScript identity first, then the same named family, weight and slant.
+pub fn same_face_name(a: &str, b: &str) -> bool {
+    let key = face_key(a);
+    let identity = face_identity(a);
+    !key.is_empty() && (key == face_key(b) || (!identity.0.is_empty() && identity == face_identity(b)))
+}
+
 /// Full, approved faces of the source family. This never silently selects another family.
 pub fn matching_faces(name: &str) -> Vec<&'static crate::CraftFont> {
     let key = face_key(name);
@@ -360,6 +397,17 @@ fn same_resource(doc: &Document, fonts: &Dict, name: &str, programs: &mut Progra
 mod tests {
     use super::*;
     use crate::pdf::Metrics;
+
+    #[test]
+    fn installed_face_names_keep_family_weight_and_slant() {
+        assert!(same_face_name("ABCDEF+Arial-BoldMT", "Arial-Bold"));
+        assert!(same_face_name("ABCDEF+Calibri", "Calibri-Regular"));
+        assert!(same_face_name("ABCDEF+TimesNewRomanPSMT", "TimesNewRoman-Regular"));
+        assert!(!same_face_name("Arial-Bold", "Arial-Regular"));
+        assert!(!same_face_name("Arial-Italic", "Arial-Regular"));
+        assert!(!same_face_name("Arial-Bold", "Helvetica-Bold"));
+        assert!(!same_face_name("", "Regular"));
+    }
 
     #[test]
     fn full_unicode_embedding_keeps_outlines_advances_and_roundtrip_codes() {

@@ -721,6 +721,7 @@ pub struct PdfCraftApp {
     /// Restore last view settings when reopening documents (Preferences ▸ Documents and view;
     /// #1767): the page, zoom and page display a file was last shown with. On by default.
     pub restore_last_view: bool,
+    pub match_installed_fonts: bool,
     /// How files were last shown, most recent first (see `last_view`).
     pub last_views: Vec<last_view::LastView>,
     /// The files open when PdfCraft last closed, read from the settings for
@@ -1146,6 +1147,7 @@ impl PdfCraftApp {
             recent: Vec::new(),
             reopen_last_session: false,
             restore_last_view: true,
+            match_installed_fonts: false,
             last_views: Vec::new(),
             last_session: Default::default(),
             quit_session: None,
@@ -2619,6 +2621,7 @@ impl PdfCraftApp {
             "recent": self.recent,
             "reopen_last_session": self.reopen_last_session,
             "restore_last_view": self.restore_last_view,
+            "match_installed_fonts": self.match_installed_fonts,
             "last_views": self.last_views_to_save(),
             // Kept only while the preference is on.
             "last_session": self.reopen_last_session.then(|| self.session_to_save()),
@@ -2723,6 +2726,7 @@ impl PdfCraftApp {
         if let Some(on) = v["restore_last_view"].as_bool() {
             self.restore_last_view = on;
         }
+        self.match_installed_fonts = v["match_installed_fonts"].as_bool().unwrap_or(false);
         self.restore_last_views(&v["last_views"]);
         self.last_session = last_session::LastSession::from_json(&v["last_session"]);
         if let Some(on) = v["system_title_bar"].as_bool() {
@@ -3688,6 +3692,10 @@ impl eframe::App for PdfCraftApp {
             self.show_progress(&ctx);
             widgets::toast(self, &ctx);
             self.finish_render_frame(&ctx);
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.prepare_installed_fonts(&ctx) {
+                ctx.request_repaint();
+            }
             return;
         }
         self.sync_window_frame(&ctx);
@@ -3737,6 +3745,10 @@ impl eframe::App for PdfCraftApp {
         self.show_progress(&ctx);
         widgets::toast(self, &ctx);
         self.finish_render_frame(&ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.prepare_installed_fonts(&ctx) {
+            ctx.request_repaint();
+        }
     }
 }
 

@@ -199,6 +199,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 
 ## Progress log
 
+- 2026-10-25 — M7 candidate: opt-in installed subset matching ported from #1267 by @komo1iddin, using #4456’s embedding grant (Refs #2077); cached bounded discovery, desktop preference and paragraph tool reporting. Scoped core tests, layers and assets pass; full automation has one sandbox-blocked non-UTF-8 fixture test. Rustfmt/Clippy and a UI test dependency are unavailable locally; no readiness change.
+
 - **2026-10-24 (M14, #4253):** The annotation quick bar remembers Keep tool selected across restarts, including unpinning. Old and malformed settings keep safe defaults; the opt-in UI control channel reads and changes the same preference. Estimates unchanged.
 
 - **2026-10-23 (M7, #4280):** Edit text names each standard stand-in font after its face (`PCEdTimesBold`, ...) instead of one shared `PCEdHelv`. Rewriting a bold paragraph whose subset lacks an accent no longer repoints the paragraphs set earlier in a regular stand-in at Times-Bold, and the editor's frame stays on the paragraph being edited. Pages saved by older builds keep their shared name and are not repaired. Estimates unchanged.

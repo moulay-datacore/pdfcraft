@@ -9108,3 +9108,30 @@ fn page_render_draws_stamps_without_an_appearance() {
     let grey = custom.iter().filter(|p| p[0].abs_diff(p[1]) < 24 && p[1].abs_diff(p[2]) < 24).count();
     assert!(grey > 100 && grey == custom.len(), "an unknown name is a grey placeholder: {grey} of {}", custom.len());
 }
+
+#[path = "../../../engine/tests/it/support/font_fixture.rs"]
+mod font_fixture;
+#[path = "../../../engine/tests/it/support/source_subset.rs"]
+mod source_subset;
+
+// Based on #1267 by @komo1iddin; font inputs are contributor-original synthetic rectangles.
+#[test]
+fn installed_matching_completion_through_tools_is_opt_in_and_confined() {
+    let dir = workdir("matching-subset");
+    std::fs::write(dir.join("source.pdf"), source_subset::source_subset().as_ref()).unwrap();
+    std::fs::write(dir.join("face.otf"), font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true)).unwrap();
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"source.pdf"}))["doc"].as_u64().unwrap();
+    let off = ok(&mut a, "text_edit_layout", json!({"doc":id,"page":1,"paragraph":1,"text":"AB"}));
+    assert_eq!(off["installed_completions"], json!([]));
+    let on = ok(&mut a, "text_edit_layout", json!({"doc":id,"page":1,"paragraph":1,"text":"AB","installed":true}));
+    assert_eq!(on["installed_completions"], json!(["RectFont-Regular"]));
+    let edited = ok(&mut a, "text_edit", json!({"doc":id,"page":1,"paragraph":1,"text":"AB","installed":true}));
+    assert_eq!(edited["installed_completions"], json!(["RectFont-Regular"]));
+    let render = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+    assert!(render.iter().any(|c| matches!(c, Content::Png { .. })));
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"saved.pdf"}));
+    let saved = ok(&mut a, "doc_open", json!({"path":"saved.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":saved,"page":1}))["paragraphs"][0]["text"], "AB");
+    let _ = std::fs::remove_dir_all(dir);
+}

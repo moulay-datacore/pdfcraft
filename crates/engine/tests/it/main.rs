@@ -2,6 +2,7 @@
 
 mod support {
     pub mod font_fixture;
+    pub mod source_subset;
 }
 
 mod document_fonts;
