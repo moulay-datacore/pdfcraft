@@ -335,7 +335,7 @@ fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static 
     // Format text at the top while text is selected or being added.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        ui.checkbox(&mut app.match_installed_fonts, tl!("Use matching fonts installed on this computer"));
+        ui.add(widgets::checkbox(&mut app.match_installed_fonts, tl!("Use matching fonts installed on this computer")));
         if app.match_installed_fonts {
             ui.label(tl!("Only fonts permitting editable embedding are used. You are responsible for the font licence when sharing the PDF."));
         }
