@@ -232,5 +232,6 @@ navigation-history tool; use the opt-in UI control channel to navigate the displ
 
 Installed subset completion (Refs #2077, based on #1267 by @komo1iddin) uses an immutable,
 bounded `text_fonts::Catalogue` snapshot. Frontends opt in explicitly; paragraph automation
-uses `installed: true` on each call and reports `installed_completions`. Font bytes are
+uses `installed: true` on each call and reports `installed_completions`. The catalogue is detached
+after every call, including failures; a later call needs its own opt-in. Font bytes are
 registered inside the text transaction; L4 performs no filesystem reads. Collections remain unsupported.

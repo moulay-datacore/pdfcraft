@@ -231,6 +231,13 @@ impl Automation {
 
     /// Run the tool `name` with JSON `args` (an object; `null` means no arguments).
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Vec<Content>> {
+        // Opt-in belongs to this call, including every early return or error in dispatch.
+        let result = self.call_inner(name, args);
+        self.session.clear_text_font_catalogue();
+        result
+    }
+
+    fn call_inner(&mut self, name: &str, args: &Value) -> Result<Vec<Content>> {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         if !args.is_object() {

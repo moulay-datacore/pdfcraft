@@ -9126,12 +9126,33 @@ fn installed_matching_completion_through_tools_is_opt_in_and_confined() {
     assert_eq!(off["installed_completions"], json!([]));
     let on = ok(&mut a, "text_edit_layout", json!({"doc":id,"page":1,"paragraph":1,"text":"AB","installed":true}));
     assert_eq!(on["installed_completions"], json!(["RectFont-Regular"]));
+    assert!(!a.session().has_text_font_catalogue(), "preview opt-in belongs to this call only");
+    let listed = ok(&mut a, "text_fonts", json!({"doc":id,"page":1}));
+    assert!(listed["fonts"].as_array().unwrap().iter().all(|f| f["preview_only"] != true));
     let edited = ok(&mut a, "text_edit", json!({"doc":id,"page":1,"paragraph":1,"text":"AB","installed":true}));
     assert_eq!(edited["installed_completions"], json!(["RectFont-Regular"]));
+    assert!(!a.session().has_text_font_catalogue(), "edit opt-in belongs to this call only");
     let render = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
     assert!(render.iter().any(|c| matches!(c, Content::Png { .. })));
     ok(&mut a, "doc_save", json!({"doc":id,"path":"saved.pdf"}));
     let saved = ok(&mut a, "doc_open", json!({"path":"saved.pdf"}))["doc"].as_u64().unwrap();
     assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":saved,"page":1}))["paragraphs"][0]["text"], "AB");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn installed_matching_catalogue_is_detached_after_failed_calls() {
+    let dir = workdir("matching-subset-errors");
+    std::fs::write(dir.join("source.pdf"), source_subset::source_subset().as_ref()).unwrap();
+    std::fs::write(dir.join("face.otf"), font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true)).unwrap();
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"source.pdf"}))["doc"].as_u64().unwrap();
+    for tool in ["text_edit_layout", "text_edit"] {
+        // Discovery/attachment happens before page validation; errors must release it too.
+        assert!(a.call(tool, &json!({"doc":id,"page":2,"paragraph":1,"text":"AB","installed":true})).is_err());
+        assert!(!a.session().has_text_font_catalogue(), "{tool} failed but retained its opt-in");
+        let listed = ok(&mut a, "text_fonts", json!({"doc":id,"page":1}));
+        assert!(listed["fonts"].as_array().unwrap().iter().all(|f| f["preview_only"] != true));
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
