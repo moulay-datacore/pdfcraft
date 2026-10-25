@@ -209,6 +209,8 @@ fn batch_ocr_reads_the_language_asked_for_and_says_which_it_read() {
     let mut auto = Automation::new().with_root(dir.path()).unwrap();
     let refused = auto.call("doc_batch", &json!({"paths":["page.pdf"],"steps":["ocr"],"language":"xx","out_dir":"out"})).unwrap_err();
     assert!(refused.to_string().contains("en, fr, de"), "{refused}");
+    let alone = auto.call("doc_batch", &json!({"paths":["page.pdf"],"steps":["optimize"],"replace_ocr":true,"out_dir":"out"})).unwrap_err();
+    assert!(alone.to_string().contains("replace_ocr settings need the ocr step"), "{alone}");
     let report = result(&mut auto, json!({"paths":["page.pdf"],"steps":["ocr"],"language":"fr","replace_ocr":true,"out_dir":"out"}));
     if pdfcraft_engine::ocr::available() {
         assert_eq!(report["completed"], 1, "{report}");
