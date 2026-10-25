@@ -72,25 +72,30 @@ pub(crate) fn installed_font_files(ctx: &egui::Context, installed: bool) -> Opti
 impl PdfCraftApp {
     /// Returns true when newly available editor families take effect on the next frame.
     pub(crate) fn prepare_installed_fonts(&mut self, ctx: &egui::Context) -> bool {
-        if self.match_installed_fonts {
-            if self.views.is_empty() || self.session.has_text_font_catalogue() {
-                return false;
+        let catalogue_changed = if self.match_installed_fonts && !self.session.has_text_font_catalogue() && !self.views.is_empty() {
+            if let Some(fonts) = installed_font_catalogue(ctx, true) {
+                self.session.set_text_font_catalogue(fonts);
+                true
+            } else {
+                false
             }
-            let Some(fonts) = installed_font_catalogue(ctx, true) else { return false };
-            self.session.set_text_font_catalogue(fonts);
-        } else {
-            if !self.session.has_text_font_catalogue() {
-                return false;
-            }
+        } else if !self.match_installed_fonts && self.session.has_text_font_catalogue() {
             self.session.clear_text_font_catalogue();
-        }
+            true
+        } else {
+            false
+        };
         let mut changed = false;
         for view in &mut self.views {
-            if let Some(ed) = &mut view.line_editor
+            let fonts_pending = view.text_background.take_font_refresh();
+            if (catalogue_changed || fonts_pending)
+                && let Some(ed) = &mut view.line_editor
                 && let Some(doc) = self.session.get(view.id)
             {
                 ed.fonts = crate::edit_text_ui::install_source_fonts(ctx, doc, ed.page);
-                view.text_background = Default::default();
+                if catalogue_changed {
+                    view.text_background = Default::default();
+                }
                 changed = true;
             }
         }

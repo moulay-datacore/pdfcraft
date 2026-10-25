@@ -213,6 +213,10 @@ impl Catalogue {
         Self { fonts, index, grant, families }
     }
 
+    pub(crate) fn grant(&self) -> FontGrant {
+        self.grant
+    }
+
     pub fn files(&self) -> impl Iterator<Item = &FontFile> {
         self.fonts.iter().map(|font| &font.file)
     }

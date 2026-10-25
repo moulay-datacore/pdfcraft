@@ -26,6 +26,7 @@ enum TextTarget {
 /// colour, pictures and unselected text beneath the editor remain visible.
 #[derive(Default)]
 pub(crate) struct TextBackground {
+    fonts_pending: bool,
     key: Option<(u64, usize, TextTarget)>,
     renderer: Option<pdfcraft_render::RenderPool>,
     texture: Option<egui::TextureHandle>,
@@ -56,6 +57,10 @@ struct EditorLook {
 }
 
 impl TextBackground {
+    pub(crate) fn take_font_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.fonts_pending)
+    }
+
     pub fn pending(&self) -> bool {
         self.renderer.is_some() && self.received != self.tag
     }
@@ -96,6 +101,9 @@ impl TextBackground {
         draft: Option<&crate::content_ui::TextDraft>,
         scale: f32,
     ) {
+        if editor.is_none() {
+            doc.clear_text_font_preview();
+        }
         let key = editor
             .map(|ed| (doc.edit_generation(), ed.page, TextTarget::Block(ed.block)))
             .or_else(|| draft.and_then(|d| d.index.map(|index| (doc.edit_generation(), d.page, TextTarget::Added(index)))));
@@ -117,7 +125,14 @@ impl TextBackground {
         if let Some(ed) = editor {
             let draft_key = (ed.text.clone(), ed.style());
             if self.draft_key.as_ref() != Some(&draft_key) {
+                let previous_fonts = doc.text_font_preview_key();
                 self.draft_rect = doc.text_edit_layout(ed.page, ed.block, &ed.text, &draft_key.1).ok().and_then(|layout| layout.draft_rect);
+                let current_fonts = doc.text_font_preview_key();
+                if current_fonts != previous_fonts && current_fonts.is_some_and(|(_, _, _, count)| count > 0) {
+                    // Named families become available next frame; register after input/drawing.
+                    self.fonts_pending = true;
+                    ctx.request_repaint();
+                }
                 self.draft_key = Some(draft_key);
             }
         }
@@ -1383,10 +1398,7 @@ pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::D
         stack.extend(
             programs
                 .iter()
-                .filter(|p| {
-                    pdfcraft_fonts::embedding::face_key(&p.face) == pdfcraft_fonts::embedding::face_key(&program.face)
-                        && p.resource != program.resource
-                })
+                .filter(|p| pdfcraft_fonts::embedding::same_face_name(&p.face, &program.face) && p.resource != program.resource)
                 .filter_map(|p| families.get(&p.resource).cloned()),
         );
         if let Some(fallback) = definitions.families.get(&FontFamily::Proportional) {
@@ -1765,8 +1777,54 @@ pub(crate) fn caret_color_on(fill: Color32) -> Color32 {
 }
 
 #[cfg(test)]
+#[path = "../../engine/tests/it/support/font_fixture.rs"]
+mod font_fixture;
+#[cfg(test)]
+#[path = "../../engine/tests/it/support/source_subset.rs"]
+mod source_subset;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn installed_preview_fonts_refresh_after_drawing_and_complete_alias_stacks() {
+        let dir = std::env::temp_dir().join(format!("pdfcraft-ui-paragraph-font-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("face.otf"), font_fixture::named_font("Rect Font", "RectFont", 0, true)).unwrap();
+        let (mut app, mut ed) = preview_app();
+        app.open_bytes("subset.pdf", None, source_subset::source_subset().as_ref().clone()).unwrap();
+        let index = app.active.unwrap();
+        let id = app.views[index].id;
+        app.match_installed_fonts = true;
+        app.session.set_text_font_catalogue(Arc::new(pdfcraft_engine::text_fonts::Catalogue::discover(
+            std::slice::from_ref(&dir),
+            pdfcraft_engine::FontGrant::InstalledEmbeddable,
+        )));
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let doc = app.session.get(id).unwrap();
+        ed.fonts = install_source_fonts(&ctx, doc, 0);
+        assert_eq!(ed.fonts.len(), 1);
+        ed.text = "AB".into();
+        let mut background = TextBackground::default();
+        background.prepare(&ctx, doc, Some(&ed), None, 1.0);
+        assert_eq!(ed.fonts.len(), 1, "the current frame keeps its active atlas until drawing finishes");
+        app.views[index].line_editor = Some(ed);
+        app.views[index].text_background = background;
+        assert!(app.prepare_installed_fonts(&ctx), "new paragraph fonts refresh even when the catalogue was already attached");
+        let families = &app.views[index].line_editor.as_ref().unwrap().fonts;
+        assert_eq!(families.len(), 2);
+        let source = families.get("F1").unwrap().clone();
+        let full = families.iter().find(|(key, _)| key.starts_with("PCFull")).unwrap().1.clone();
+        ctx.end_pass().textures_delta.clear();
+        ctx.begin_pass(Default::default());
+        assert!(ctx.fonts(|f| f.definitions().families.get(&FontFamily::Name(source.into())).unwrap().contains(&full)));
+        ctx.end_pass().textures_delta.clear();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn the_rotate_knob_moves_below_when_there_is_no_room_above() {

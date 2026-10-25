@@ -4155,6 +4155,7 @@ impl Session {
         }
         doc.dirty = true;
         doc.generation += 1;
+        doc.clear_text_font_preview();
         doc.edit_notices = notices;
         doc.installed_completions = cx.installed_completions;
         if !cx.xfa_removed.is_empty() {
@@ -4205,6 +4206,7 @@ impl Session {
         doc.installed_completions.clear();
         Self::sync_dirty(doc);
         doc.generation += 1;
+        doc.clear_text_font_preview();
         Ok(label)
     }
 
@@ -4235,6 +4237,7 @@ impl Session {
         doc.installed_completions.clear();
         Self::sync_dirty(doc);
         doc.generation += 1;
+        doc.clear_text_font_preview();
         Ok(label)
     }
 
@@ -4568,6 +4571,7 @@ impl Session {
         }
         doc.dirty = false;
         doc.generation += 1;
+        doc.clear_text_font_preview();
         Self::refresh(doc).inspect_err(|_| Self::show_released(doc))
     }
 
@@ -4626,6 +4630,7 @@ impl Session {
         Self::adopt_keys(doc);
         Self::sync_dirty(doc);
         doc.generation += 1;
+        doc.clear_text_font_preview();
         Self::refresh(doc).inspect_err(|_| Self::show_released(doc))
     }
 
@@ -5123,6 +5128,7 @@ impl Session {
             }
             // Unsaved work with no edit yet still needs its first recovery snapshot.
             d.generation += 1;
+            d.clear_text_font_preview();
         }
         Ok(id)
     }
@@ -5197,6 +5203,7 @@ impl Session {
                 e.unsaved_file = true;
             }
             d.generation += 1;
+            d.clear_text_font_preview();
             d.snapshot_generation = d.generation; // its bytes are already in the recovery store
         }
     }
@@ -5254,6 +5261,7 @@ impl Session {
         doc.config.hide_comments = hide;
         doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
         doc.generation += 1;
+        doc.clear_text_font_preview();
         true
     }
 
@@ -5267,6 +5275,7 @@ impl Session {
         doc.config.reading_colors = colors;
         doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
         doc.generation += 1;
+        doc.clear_text_font_preview();
         true
     }
 

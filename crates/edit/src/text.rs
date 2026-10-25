@@ -175,27 +175,89 @@ pub fn missing_source_glyphs(doc: &Document, page: usize, block: usize, text: &s
     let lines = text_lines(doc, page)?;
     let blocks = group_blocks(&lines);
     let block = blocks.get(block).ok_or_else(|| EditError::Invalid("text block does not exist".into()))?;
-    // These paths do not consume mixed page-font resources yet; do not register or report
-    // a face that the rewrite would replace with its existing single-face fallback.
-    if text.chars().any(crate::bidi::is_hebrew) || block.lines.iter().filter_map(|i| lines.get(*i)).any(|line| !line.upright() || line.visual_order) {
-        return Ok(Vec::new());
-    }
-    let p = page_dict(doc, page)?;
-    let resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();
-    let fonts = resources.get(b"Font").and_then(|o| doc.dict(o)).unwrap_or_default();
-    let metrics: Vec<_> = fonts.iter().take(256).filter_map(|(_, f)| doc.dict(f).map(|f| Metrics::from_dict(doc, &f))).collect();
-    let characters: std::collections::BTreeSet<_> = text.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
-    let mut needs = std::collections::BTreeMap::new();
-    for line in block.lines.iter().filter_map(|i| lines.get(*i)) {
-        let key = pdfcraft_fonts::embedding::face_key(&line.base_font);
-        if needs.contains_key(&key) {
-            continue;
+    MissingSourceGlyphs::new(doc, page, &lines, block)?.missing(text)
+}
+
+/// One paragraph's source faces and glyph checks. The owner invalidates this with the document
+/// generation changes; font registration keeps the original source coverage for notices.
+/// No filesystem access happens here.
+struct MissingSourceGlyphs {
+    eligible: bool,
+    sources: Vec<(String, Vec<usize>)>,
+    metrics: Vec<Metrics>,
+    checked: std::collections::BTreeMap<(usize, char), bool>,
+    #[cfg(test)]
+    queries: usize,
+}
+
+impl MissingSourceGlyphs {
+    fn new(doc: &Document, page: usize, lines: &[TextLine], block: &TextBlock) -> Result<Self, EditError> {
+        let eligible = !block.lines.iter().filter_map(|i| lines.get(*i)).any(|line| !line.upright() || line.visual_order);
+        let p = page_dict(doc, page)?;
+        let resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();
+        let fonts = resources.get(b"Font").and_then(|o| doc.dict(o)).unwrap_or_default();
+        let metrics: Vec<_> = fonts.iter().take(256).filter_map(|(_, f)| doc.dict(f).map(|f| Metrics::from_dict(doc, &f))).collect();
+        let mut sources = std::collections::BTreeMap::new();
+        for line in block.lines.iter().filter_map(|i| lines.get(*i)) {
+            let key = pdfcraft_fonts::embedding::face_key(&line.base_font);
+            if sources.len() >= 256 && !sources.contains_key(&key) {
+                continue;
+            }
+            sources.entry(key).or_insert_with(|| {
+                let peers = metrics
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| pdfcraft_fonts::embedding::same_face_name(&m.base_font, &line.base_font))
+                    .map(|(i, _)| i)
+                    .collect();
+                (line.base_font.clone(), peers)
+            });
         }
-        let peers: Vec<_> = metrics.iter().filter(|m| pdfcraft_fonts::embedding::same_face_name(&m.base_font, &line.base_font)).collect();
-        let missing: String = characters.iter().copied().filter(|c| !peers.iter().any(|m| source_encodes(m, &c.to_string()))).collect();
-        needs.insert(key, (line.base_font.clone(), missing));
+        Ok(Self {
+            eligible,
+            sources: sources.into_values().collect(),
+            metrics,
+            checked: Default::default(),
+            #[cfg(test)]
+            queries: 0,
+        })
     }
-    Ok(needs.into_values().filter(|(_, missing)| !missing.is_empty()).collect())
+
+    fn missing(&mut self, text: &str) -> Result<Vec<(String, String)>, EditError> {
+        if text.len() > 262_144 {
+            return Err(EditError::Invalid("the replacement text exceeds 256 KiB".into()));
+        }
+        // These rewrites cannot consume mixed page-font resources yet.
+        if !self.eligible || text.chars().any(crate::bidi::is_hebrew) {
+            return Ok(Vec::new());
+        }
+        let characters: std::collections::BTreeSet<_> = text.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
+        let mut missing = Vec::new();
+        for (index, (source, peers)) in self.sources.iter().enumerate() {
+            let mut absent = String::new();
+            for &ch in &characters {
+                let encodes = self.checked.get(&(index, ch)).copied().unwrap_or_else(|| {
+                    #[cfg(test)]
+                    {
+                        self.queries = self.queries.saturating_add(1);
+                    }
+                    let encodes = peers.iter().filter_map(|i| self.metrics.get(*i)).any(|m| source_encodes(m, &ch.to_string()));
+                    // One active paragraph retains at most 65,536 per-face character results.
+                    if self.checked.len() < 65_536 {
+                        self.checked.insert((index, ch), encodes);
+                    }
+                    encodes
+                });
+                if !encodes {
+                    absent.push(ch);
+                }
+            }
+            if !absent.is_empty() {
+                missing.push((source.clone(), absent));
+            }
+        }
+        Ok(missing)
+    }
 }
 
 /// Read-only draft bounds, measured with the same PDF rewrite used by Apply/Save.
@@ -3579,6 +3641,25 @@ mod tests {
             spans: Vec::new(),
             invisible: false,
         }
+    }
+
+    #[test]
+    fn missing_glyph_checks_cache_each_source_face_and_character() {
+        let mut coverage = MissingSourceGlyphs {
+            eligible: true,
+            sources: vec![("First".into(), vec![0]), ("Second".into(), vec![0])],
+            metrics: vec![Metrics::fallback()],
+            checked: Default::default(),
+            queries: 0,
+        };
+        let original = coverage.missing("AB").unwrap();
+        assert_eq!(coverage.queries, 4);
+        assert_eq!(coverage.missing("BBAA\n").unwrap(), original);
+        assert_eq!(coverage.queries, 4, "reordering and duplicating text reuses each face's character results");
+        coverage.missing("ABC").unwrap();
+        assert_eq!(coverage.queries, 6, "typing a new character checks only that character in each face");
+        assert_eq!(coverage.checked.len(), 6);
+        assert!(coverage.missing(&"x".repeat(262_145)).is_err());
     }
 
     #[test]

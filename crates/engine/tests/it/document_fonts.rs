@@ -290,3 +290,36 @@ fn installed_font_lists_do_not_load_unedited_programs() {
     assert!(untouched.iter().all(|f| !f.resource.starts_with("PCApprovedInstalled")));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn installed_font_preview_reuses_one_paragraph_program_until_generation_changes() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-preview-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("face.otf");
+    std::fs::write(&path, support::font_fixture::named_font("Rect Font", "RectFont", 0, true)).unwrap();
+    let fonts = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
+    let mut session = Session::new();
+    let source = support::source_subset::source_subset();
+    let id = session.open("source.pdf", None, source.clone(), None).unwrap();
+    session.set_text_font_catalogue(fonts);
+    let style = BlockStyle::default();
+    let doc = session.get(id).unwrap();
+    assert!(doc.text_font_preview_key().is_none());
+    let expected = doc.matching_font_completions(0, 0, "AB", &style).unwrap();
+    assert_eq!(expected.len(), 1);
+    let key = doc.text_font_preview_key();
+    assert_eq!(key.map(|(_, _, _, count)| count), Some(1));
+    std::fs::remove_file(&path).unwrap();
+    for text in ["ABB", "BAA", "A B", "AB"] {
+        assert_eq!(doc.matching_font_completions(0, 0, text, &style).unwrap(), expected);
+        doc.text_edit_layout(0, 0, text, &style).unwrap();
+        assert_eq!(doc.text_font_preview_key(), key, "keystrokes reuse a validated full face without registering it again");
+    }
+    assert_eq!(doc.bytes, source);
+    assert!(!doc.dirty && doc.can_undo().is_none());
+    session.apply(id, Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap();
+    assert!(session.get(id).unwrap().text_font_preview_key().is_none(), "a changed document generation cannot use the previous paragraph preview");
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -42,7 +42,10 @@ without a cumulative font-size budget. A matching program is read in full only w
 changed files and programs failing the full grant validation are skipped. Exact PostScript matches are preferred, then
 matching family, weight and italic names; another family never completes a subset. Existing
 glyphs retain the source resource; only missing glyphs use the registered full face. Completion
-and text are one undo step. The UI reports the face “from this computer”; automation returns
+and text are one undo step. Drafts reuse one generation/page/paragraph session and cached
+source-face character coverage. Only a matched paragraph retains validated programs (at most
+32 MiB), released when the editor closes or the document changes. New editor font families
+are installed after drawing so the next frame can use them. The UI reports the face “from this computer”; automation returns
 `installed_completions` for the requested paragraph (including layout previews). Automation scans
 only its permitted read root when confined. Collections (`.ttc`), variable instances and ambiguous
 or unrecognized style names remain unsupported. Turned text, Hebrew and visual-order Indic
