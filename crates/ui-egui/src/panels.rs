@@ -541,7 +541,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         let sources: Vec<(String, String)> = app
             .session
             .get(app.views[i].id)
-            .map(|d| d.text_editor_fonts(ed.page))
+            .map(|d| if ed.is_ocr() { d.ocr_text_editor_fonts(ed.page) } else { d.text_editor_fonts(ed.page) })
             .unwrap_or_default()
             .into_iter()
             .map(|f| (f.resource, f.face))
@@ -659,7 +659,7 @@ impl PdfCraftApp {
             {
                 ed.refresh_source(block, doc.text_lines(ed.page));
                 if let Some(ctx) = ctx {
-                    ed.fonts = crate::edit_text_ui::install_source_fonts(ctx, doc, ed.page);
+                    ed.fonts = crate::edit_text_ui::install_source_fonts(ctx, doc, ed.page, ed.is_ocr());
                 }
             }
         }

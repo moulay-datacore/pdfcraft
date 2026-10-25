@@ -101,3 +101,79 @@ fn scanned_text_explains_the_font_and_offers_replacement_faces() {
     let doc = app.session.get(app.views[0].id).unwrap();
     assert!(doc.text_lines(0).iter().all(|line| line.base_font == "Inter-Regular"));
 }
+
+fn check_remembered_scan_face(pick: &str, shown: &str, reselect: bool) {
+    use pdfcraft_cos::{Dict, Document, Object, SaveOptions, Stream, write_incremental};
+    let mut source = Document::open(std::sync::Arc::new(ocr_font_fixture())).unwrap();
+    let page = pdfcraft_model::pages(&source)[0].clone();
+    let contents = source.add(Object::Stream(Stream::flate(Dict::new(), b"/PCMark /OCR BDC BT /F1 1 Tf 3 Tr 12 0 0 14 20 100 Tm (Again) Tj ET EMC")));
+    source.update_dict(page.obj, |dict| dict.set(b"Contents".to_vec(), Object::Ref(contents))).unwrap();
+    let second = write_incremental(&source, &SaveOptions::default()).unwrap();
+    let session = pdfcraft_engine::Session::new();
+    let bytes =
+        session.combine(&[("First".into(), std::sync::Arc::new(ocr_font_fixture())), ("Second".into(), std::sync::Arc::new(second))]).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("two-scans.pdf", None, bytes.as_ref().clone()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    let click_row = |h: &mut Harness<'static, PdfCraftApp>, page_index: usize, baseline: f32| {
+        let page = h.state().views[0].page_screen_rect(page_index).unwrap();
+        let at = egui::pos2(page.left() + 25.0 / 300.0 * page.width(), page.top() + (300.0 - baseline - 5.0) / 300.0 * page.height());
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(3);
+        assert!(h.state().views[0].line_editor.is_some());
+    };
+    click_row(&mut h, 0, 220.0);
+    h.get_by_value("Helvetica").click();
+    h.run_steps(2);
+    h.get_by_label(pick).click();
+    h.run_steps(4);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let id = h.state().views[0].id;
+    let generation = h.state().session.get(id).unwrap().edit_generation();
+    h.state_mut().set_option("page", "2").unwrap();
+    h.run_steps(4);
+    click_row(&mut h, 1, 100.0);
+    h.get_by_label("Scanned text: the original font is part of the image");
+    h.get_by_value(shown);
+    assert_eq!(h.state().views[0].line_editor.as_ref().unwrap().style(), Default::default());
+    assert_eq!(h.state().session.get(id).unwrap().edit_generation(), generation);
+    assert!(h.state().session.get(id).unwrap().text_editor_fonts(1).is_empty(), "OCR preview aliases never enter the native font inventory");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().session.get(id).unwrap().edit_generation(), generation, "opening and closing only displays the remembered choice");
+    click_row(&mut h, 1, 100.0);
+    h.get_by_value(shown).click();
+    h.run_steps(2);
+    if reselect {
+        h.get_by_label(shown).click();
+        h.run_steps(4);
+        let doc = h.state().session.get(id).unwrap();
+        let block = doc.text_blocks(1).into_iter().find(|block| block.text == "Again").unwrap();
+        assert!(!block.invisible, "reselecting the virtual OCR face applies it successfully");
+        assert_eq!(block.base_font, "Inter-Regular");
+        return;
+    }
+    h.get_by_label("Courier").click();
+    h.run_steps(4);
+    let doc = h.state().session.get(id).unwrap();
+    let again = doc.text_lines(1).into_iter().find(|line| line.text == "Again").unwrap();
+    assert_eq!(again.base_font, "Courier", "an explicit family replaces the inherited face");
+}
+
+#[test]
+fn opening_another_scan_uses_the_remembered_replacement_without_an_edit() {
+    check_remembered_scan_face("Inter Regular", "Inter-Regular", false);
+    check_remembered_scan_face("Inter Regular", "Inter-Regular", true);
+    check_remembered_scan_face("Times", "Times", false);
+}

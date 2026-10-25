@@ -102,7 +102,8 @@ impl Document {
             let Some(fonts) = &self.text_fonts else {
                 return Ok(Vec::new());
             };
-            self.with_prepared_fonts(page, block, |prepared| prepared.prepare(fonts, text, style))
+            let style = self.effective_ocr_style(page, block, style)?;
+            self.with_prepared_fonts(page, block, |prepared| prepared.prepare(fonts, text, &style))
         })?
     }
 
@@ -115,11 +116,12 @@ impl Document {
         style: &pdfcraft_edit::BlockStyle,
     ) -> Result<pdfcraft_edit::text::TextEditLayout, String> {
         guard(|| {
+            let style = self.effective_ocr_style(page, block, style)?;
             self.with_prepared_fonts(page, block, |prepared| {
                 if let Some(fonts) = &self.text_fonts {
-                    prepared.prepare(fonts, text, style)?;
+                    prepared.prepare(fonts, text, &style)?;
                 }
-                prepared.session.layout(text, style).map_err(|e| e.to_string())
+                prepared.session.layout(text, &style).map_err(|e| e.to_string())
             })
         })?
     }
@@ -130,11 +132,17 @@ impl Document {
         if !cache.as_ref().is_some_and(|c| c.generation == self.generation && c.page == page && c.block == block) {
             #[cfg(test)]
             record_preview_open();
+            let mut cos = editor.cos.clone();
+            if editor.text_blocks(page).map_err(|e| e.to_string())?.get(block).is_some_and(|b| b.invisible)
+                && let Some(choice) = &editor.ocr_font
+            {
+                choice.install(&mut cos, page).map_err(|e| e.to_string())?;
+            }
             *cache = Some(PreparedFonts {
                 generation: self.generation,
                 page,
                 block,
-                session: pdfcraft_edit::text::TextSession::open(&editor.cos, page, block).map_err(|e| e.to_string())?,
+                session: pdfcraft_edit::text::TextSession::open(&cos, page, block).map_err(|e| e.to_string())?,
                 programs: Vec::new(),
                 attempted: Vec::new(),
                 names: Vec::new(),
@@ -164,15 +172,40 @@ impl Document {
             .map(|c| (c.generation, c.page, c.block, c.programs.len()))
     }
 
-    /// Embedded source faces for a text editor, bounded and validated as sfnt programs.
-    /// This is read-only; no source font is installed or exported.
+    /// Embedded source faces for a native-text editor, bounded and validated as sfnt
+    /// programs. OCR replacement choices are excluded from this page-resource inventory.
     pub fn text_editor_fonts(&self, page: usize) -> Vec<pdfcraft_edit::text::TextEditorFont> {
+        self.editor_fonts_for(page, false)
+    }
+
+    /// Faces for an OCR editor, including its remembered replacement face on a preview clone.
+    /// A virtual resource returned here is usable only by an OCR text edit, which installs it
+    /// transactionally. This does not add fonts to the ordinary page-resource inventory.
+    pub fn ocr_text_editor_fonts(&self, page: usize) -> Vec<pdfcraft_edit::text::TextEditorFont> {
+        guard(|| self.editor_fonts_for(page, true)).unwrap_or_default()
+    }
+
+    fn editor_fonts_for(&self, page: usize, ocr: bool) -> Vec<pdfcraft_edit::text::TextEditorFont> {
         if let Ok(cache) = self.text_font_preview.lock()
-            && let Some(prepared) = cache.as_ref().filter(|c| c.generation == self.generation && c.page == page && !c.programs.is_empty())
+            && let Some(prepared) = cache.as_ref().filter(|c| {
+                c.generation == self.generation && c.page == page && c.session.source().invisible == ocr && (ocr || !c.programs.is_empty())
+            })
         {
             return prepared.session.editor_fonts().unwrap_or_default();
         }
-        self.editor.as_ref().and_then(|e| pdfcraft_edit::text::text_editor_fonts(&e.cos, page).ok()).unwrap_or_default()
+        self.editor
+            .as_ref()
+            .and_then(|e| {
+                if !ocr {
+                    return pdfcraft_edit::text::text_editor_fonts(&e.cos, page).ok();
+                }
+                let mut cos = e.cos.clone();
+                if let Some(choice) = &e.ocr_font {
+                    choice.install(&mut cos, page).ok()?;
+                }
+                pdfcraft_edit::text::text_editor_fonts(&cos, page).ok()
+            })
+            .unwrap_or_default()
     }
 
     /// Preparing the background never changes working bytes, dirty state or undo history.

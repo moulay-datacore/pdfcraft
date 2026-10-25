@@ -28,6 +28,7 @@ pub mod field_table;
 pub mod js;
 pub mod links;
 pub mod ocr;
+mod ocr_text_font;
 pub mod optimizer;
 pub mod print_raster;
 pub mod printcheck;
@@ -331,7 +332,7 @@ fn scope_of(edit: &Edit) -> Scope {
 }
 
 /// One undo/redo step: its label, the document state, its passwords, and what it changed.
-type Snapshot = (Label, pdfcraft_cos::Document, Keys, Scope);
+type Snapshot = (Label, pdfcraft_cos::Document, Keys, Scope, Option<ocr_text_font::OcrFontChoice>);
 
 /// Editing state of a document (absent when the document cannot be edited yet, e.g. encrypted).
 #[derive(Clone)]
@@ -359,6 +360,8 @@ struct Editor {
     field_appearances: pdfcraft_forms::FieldAppearanceCache,
     /// The text blocks last computed for one page, reused while the document is unchanged.
     text_blocks: TextBlocksCache,
+    /// Explicit replacement face for scans; session state, never a PDF dictionary key.
+    ocr_font: Option<ocr_text_font::OcrFontChoice>,
 }
 
 /// One page's text blocks ([`pdfcraft_edit::text_blocks`]) and the document state they were read
@@ -2460,6 +2463,7 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
 /// Dates and unique ids stamped onto what an edit creates.
 struct EditCtx {
     text_fonts: Option<Arc<text_fonts::Catalogue>>,
+    ocr_font: Option<ocr_text_font::OcrFontChoice>,
     installed_completions: Vec<String>,
     /// Field scripts run (`None`: JavaScript is off) and what they produced.
     js: Option<js::JsRunner>,
@@ -2501,6 +2505,7 @@ impl EditCtx {
         }
         Self {
             text_fonts: None,
+            ocr_font: None,
             installed_completions: Vec::new(),
             js: None,
             xfa: None,
@@ -2826,10 +2831,11 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         }
         Edit::MoveObjects { page, objects, offset } => pdfcraft_edit::move_objects(doc, *page, objects, *offset)?,
         Edit::EditTextBlock { page, block, text, style } => {
+            let style = ocr_text_font::prepare_edit(doc, *page, *block, style, &mut cx.ocr_font)?;
             if let Some(fonts) = &cx.text_fonts {
-                cx.installed_completions = fonts.complete(doc, *page, *block, text, style)?;
+                cx.installed_completions = fonts.complete(doc, *page, *block, text, &style)?;
             }
-            pdfcraft_edit::rewrite_block(doc, *page, *block, Some(text), style)?;
+            pdfcraft_edit::rewrite_block(doc, *page, *block, Some(text), &style)?;
         }
         Edit::RegisterTextFont { page, bytes, grant } => {
             pdfcraft_edit::text::register_text_font(doc, *page, bytes, *grant)?;
@@ -3892,6 +3898,7 @@ impl Session {
                         appearances: AppearanceCache::default(),
                         field_appearances: pdfcraft_forms::FieldAppearanceCache::default(),
                         text_blocks: TextBlocksCache::default(),
+                        ocr_font: None,
                     }),
                     None,
                 )
@@ -3990,6 +3997,7 @@ impl Session {
         let reason = doc.read_only_reason.clone().unwrap_or_default();
         let signed = doc.is_signed();
         let editor = doc.editor.as_mut().ok_or(EditError::ReadOnly(reason))?;
+        cx.ocr_font = editor.ocr_font.clone();
         if let Some(p) = editor.cos.permissions() {
             check_permission(&edit, &p)?;
         }
@@ -4131,7 +4139,8 @@ impl Session {
         let previous = std::mem::replace(&mut editor.cos, next);
         let keys = keys_after(&edit).unwrap_or_else(|| editor.keys.clone());
         let previous_keys = std::mem::replace(&mut editor.keys, keys);
-        editor.undo.push((label, previous, previous_keys, scope));
+        let previous_ocr_font = std::mem::replace(&mut editor.ocr_font, cx.ocr_font);
+        editor.undo.push((label, previous, previous_keys, scope, previous_ocr_font));
         if editor.undo.len() > MAX_UNDO {
             editor.undo.remove(0);
         }
@@ -4142,10 +4151,11 @@ impl Session {
         if let Err(e) = refreshed {
             // Roll back: the edit produced something we cannot display.
             if let Some(ed) = doc.editor.as_mut()
-                && let Some((_, prev, keys, _)) = ed.undo.pop()
+                && let Some((_, prev, keys, _, ocr_font)) = ed.undo.pop()
             {
                 ed.cos = prev;
                 ed.keys = keys;
+                ed.ocr_font = ocr_font;
             }
             Self::adopt_keys(doc);
             if !matches!(guard(|| Self::refresh(doc)), Ok(Ok(()))) {
@@ -4182,19 +4192,21 @@ impl Session {
     pub fn undo(&mut self, id: DocId) -> Result<Label, EditError> {
         let doc = self.doc_mut(id)?;
         let editor = doc.editor.as_mut().ok_or(EditError::NothingToUndo)?;
-        let (label, prev, keys, scope) = editor.undo.pop().ok_or(EditError::NothingToUndo)?;
+        let (label, prev, keys, scope, ocr_font) = editor.undo.pop().ok_or(EditError::NothingToUndo)?;
         let current = std::mem::replace(&mut editor.cos, prev);
         let current_keys = std::mem::replace(&mut editor.keys, keys);
-        editor.redo.push((label.clone(), current, current_keys, scope));
+        let current_ocr_font = std::mem::replace(&mut editor.ocr_font, ocr_font);
+        editor.redo.push((label.clone(), current, current_keys, scope, current_ocr_font));
         Self::adopt_keys(doc);
         let refreshed = guard(|| Self::refresh_scoped(doc, scope)).unwrap_or_else(|m| Err(EditError::Reopen(m)));
         if let Err(e) = refreshed {
             if let Some(ed) = doc.editor.as_mut()
-                && let Some((label, current, current_keys, scope)) = ed.redo.pop()
+                && let Some((label, current, current_keys, scope, current_ocr_font)) = ed.redo.pop()
             {
                 let prev = std::mem::replace(&mut ed.cos, current);
                 let keys = std::mem::replace(&mut ed.keys, current_keys);
-                ed.undo.push((label, prev, keys, scope));
+                let ocr_font = std::mem::replace(&mut ed.ocr_font, current_ocr_font);
+                ed.undo.push((label, prev, keys, scope, ocr_font));
             }
             Self::adopt_keys(doc);
             if !matches!(guard(|| Self::refresh(doc)), Ok(Ok(()))) {
@@ -4213,19 +4225,21 @@ impl Session {
     pub fn redo(&mut self, id: DocId) -> Result<Label, EditError> {
         let doc = self.doc_mut(id)?;
         let editor = doc.editor.as_mut().ok_or(EditError::NothingToRedo)?;
-        let (label, next, keys, scope) = editor.redo.pop().ok_or(EditError::NothingToRedo)?;
+        let (label, next, keys, scope, ocr_font) = editor.redo.pop().ok_or(EditError::NothingToRedo)?;
         let current = std::mem::replace(&mut editor.cos, next);
         let current_keys = std::mem::replace(&mut editor.keys, keys);
-        editor.undo.push((label.clone(), current, current_keys, scope));
+        let current_ocr_font = std::mem::replace(&mut editor.ocr_font, ocr_font);
+        editor.undo.push((label.clone(), current, current_keys, scope, current_ocr_font));
         Self::adopt_keys(doc);
         let refreshed = guard(|| Self::refresh_scoped(doc, scope)).unwrap_or_else(|m| Err(EditError::Reopen(m)));
         if let Err(e) = refreshed {
             if let Some(ed) = doc.editor.as_mut()
-                && let Some((label, current, current_keys, scope)) = ed.undo.pop()
+                && let Some((label, current, current_keys, scope, current_ocr_font)) = ed.undo.pop()
             {
                 let next = std::mem::replace(&mut ed.cos, current);
                 let keys = std::mem::replace(&mut ed.keys, current_keys);
-                ed.redo.push((label, next, keys, scope));
+                let ocr_font = std::mem::replace(&mut ed.ocr_font, current_ocr_font);
+                ed.redo.push((label, next, keys, scope, ocr_font));
             }
             Self::adopt_keys(doc);
             if !matches!(guard(|| Self::refresh(doc)), Ok(Ok(()))) {
@@ -4554,8 +4568,10 @@ impl Session {
             let keys = editor.keys.clone();
             // The saved file carries no Password-field values (#3943, #3944); the open document keeps them.
             let typed = pdfcraft_forms::password_values(&editor.cos);
-            editor.cos =
+            let saved_cos =
                 pdfcraft_cos::Document::open_with_password(bytes.clone(), keys.reopen.as_deref()).map_err(|e| EditError::Reopen(e.to_string()))?;
+            editor.ocr_font = editor.ocr_font.as_ref().map(|f| f.rebase(&editor.cos, &saved_cos));
+            editor.cos = saved_cos;
             pdfcraft_forms::restore_password_values(&mut editor.cos, &typed).map_err(|e| EditError::Reopen(e.to_string()))?;
             if !typed.is_empty() && doc.info.xfa.is_some() {
                 let mut datasets = None;
@@ -4600,7 +4616,7 @@ impl Session {
         reopen_as_owner(&editor.cos, &mut editor.keys);
         // Other states with the same restricted access are unlocked too; states opened with
         // other passwords (protection changed and saved since) stay as they are.
-        for (_, cos, keys, _) in editor.undo.iter_mut().chain(editor.redo.iter_mut()) {
+        for (_, cos, keys, _, _) in editor.undo.iter_mut().chain(editor.redo.iter_mut()) {
             if cos.permissions().is_some_and(|p| !p.owner) && cos.unlock(password).is_ok() {
                 reopen_as_owner(cos, keys);
             }
@@ -4625,6 +4641,7 @@ impl Session {
             .ok_or_else(|| EditError::Reopen("the saved file can't be opened".into()))?;
         editor.cos = cos;
         editor.keys = keys;
+        editor.ocr_font = None;
         editor.undo.clear();
         editor.redo.clear();
         Self::adopt_keys(doc);

@@ -241,6 +241,78 @@ pub(crate) fn copy_object(dst: &mut Document, src: &Document, o: &Object, map: H
     Copier::new(src, map, HashMap::new()).copy_value(dst, o, None)
 }
 
+/// Copy one selected font resource and its transitive dependencies from an immutable document
+/// snapshot. Used when a session remembers a face whose source page has since been deleted.
+/// The copy is atomic, follows cycles once, and refuses graphs exceeding 32 MiB of raw data,
+/// 4,096 indirect objects, 131,072 values, or 128 nested levels. No pages are imported.
+pub fn import_font_resource(dst: &mut Document, src: &Document, font: &Object) -> Result<Object, OrganizeError> {
+    struct Budget {
+        values: usize,
+        bytes: usize,
+        seen: HashSet<ObjRef>,
+    }
+    impl Budget {
+        fn visit(&mut self, src: &Document, object: &Object, depth: usize) -> Result<(), OrganizeError> {
+            const ERROR: &str = "the selected font resource exceeds its copy budget";
+            if depth >= 128 || self.values == 0 {
+                return Err(OrganizeError::Invalid(ERROR.into()));
+            }
+            self.values -= 1;
+            let bytes = match object {
+                Object::Name(name) => name.len(),
+                Object::String(string) => string.bytes.len(),
+                Object::Stream(stream) => stream.raw.len(),
+                _ => 0,
+            };
+            self.bytes = self.bytes.checked_sub(bytes).ok_or_else(|| OrganizeError::Invalid(ERROR.into()))?;
+            match object {
+                Object::Ref(reference) => {
+                    if !self.seen.contains(reference) {
+                        if self.seen.len() >= 4096 {
+                            return Err(OrganizeError::Invalid(ERROR.into()));
+                        }
+                        self.seen.insert(*reference);
+                        self.visit(src, &src.get(*reference), depth + 1)?;
+                    }
+                }
+                Object::Array(array) => {
+                    for value in array {
+                        self.visit(src, value, depth + 1)?;
+                    }
+                }
+                Object::Dict(dict) => self.visit_dict(src, dict, depth)?,
+                Object::Stream(stream) => self.visit_dict(src, &stream.dict, depth)?,
+                _ => {}
+            }
+            Ok(())
+        }
+
+        fn visit_dict(&mut self, src: &Document, dict: &Dict, depth: usize) -> Result<(), OrganizeError> {
+            // A font may not pull a page tree or document catalogue into the remembered face.
+            if matches!(dict.name(b"Type"), Some(b"Page" | b"Pages" | b"Catalog")) {
+                return Err(OrganizeError::Invalid("the selected font refers to a document or page tree".into()));
+            }
+            for (key, value) in dict.iter() {
+                self.bytes = self
+                    .bytes
+                    .checked_sub(key.len())
+                    .ok_or_else(|| OrganizeError::Invalid("the selected font resource exceeds its copy budget".into()))?;
+                self.visit(src, value, depth + 1)?;
+            }
+            Ok(())
+        }
+    }
+    let resolved = src.resolve(font);
+    if !resolved.as_dict().is_some_and(|dict| matches!(dict.name(b"Subtype"), Some(b"Type0" | b"Type1" | b"MMType1" | b"TrueType" | b"Type3"))) {
+        return Err(OrganizeError::Invalid("the selected resource is not a PDF font".into()));
+    }
+    Budget { values: 131_072, bytes: 32 << 20, seen: HashSet::new() }.visit(src, font, 0)?;
+    let mut next = dst.clone();
+    let copied = copy_object(&mut next, src, font, HashMap::new())?;
+    *dst = next;
+    Ok(copied)
+}
+
 /// How colliding fully-qualified field names are resolved when pages are imported.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FieldConflicts {
@@ -1551,4 +1623,52 @@ pub fn page_as_form(dst: &mut Document, src: &Document, page: usize) -> Result<(
     let r = dst.add(Object::Stream(Stream::flate(fd, &content)));
     let size = if rotate == 90 || rotate == 270 { (h, w) } else { (w, h) };
     Ok((r, size))
+}
+
+#[cfg(test)]
+mod font_resource_tests {
+    use super::*;
+
+    fn font(extra: Object) -> Object {
+        let mut dict = Dict::new();
+        dict.set(b"Type", Object::name("Font"));
+        dict.set(b"Subtype", Object::name("Type1"));
+        dict.set(b"BaseFont", Object::name("Helvetica"));
+        dict.set(b"Extra", extra);
+        Object::Dict(dict)
+    }
+
+    #[test]
+    fn font_resource_import_rewires_cycles_without_copying_a_page() {
+        let mut src = Document::new_empty();
+        let reference = src.add(Object::Null);
+        src.set(reference, font(Object::Ref(reference)));
+        let mut dst = Document::new_empty();
+        dst.add(Object::Int(42));
+        let copied = import_font_resource(&mut dst, &src, &Object::Ref(reference)).unwrap();
+        let new_reference = copied.as_ref().unwrap();
+        assert_ne!(new_reference, reference);
+        assert_eq!(dst.dict(&copied).unwrap().reference(b"Extra"), Some(new_reference));
+        assert_eq!(src.dict(&Object::Ref(reference)).unwrap().reference(b"Extra"), Some(reference));
+    }
+
+    #[test]
+    fn font_resource_import_caps_graphs_before_mutating_the_destination() {
+        let mut deep = Object::Null;
+        for _ in 0..129 {
+            deep = Object::Array(vec![deep]);
+        }
+        let oversized = Object::Stream(pdfcraft_cos::Stream::from_raw(Dict::new(), vec![0; (32 << 20) + 1]));
+        let too_many = Object::Array(vec![Object::Null; 131_073]);
+        let mut page = Dict::new();
+        page.set(b"Type", Object::name("Page"));
+        for extra in [deep, oversized, too_many, Object::Dict(page)] {
+            let src = Document::new_empty();
+            let mut dst = Document::new_empty();
+            dst.add(Object::Int(42));
+            let before = dst.object_numbers();
+            assert!(import_font_resource(&mut dst, &src, &font(extra)).is_err());
+            assert_eq!(dst.object_numbers(), before, "a refused font copy adds no objects");
+        }
+    }
 }

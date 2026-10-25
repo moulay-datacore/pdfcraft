@@ -242,6 +242,8 @@ const MAX_OUTLINES: usize = 250;
 pub struct LineEditor {
     pub selection: Option<std::ops::Range<usize>>,
     pub font_resource: Option<String>,
+    /// Remembered OCR face for display; the engine applies it only when an edit is committed.
+    ocr_default_resource: Option<String>,
     pub page: usize,
     pub block: usize,
     pub text: String,
@@ -296,10 +298,16 @@ impl LineEditor {
         self.source.as_ref().is_some_and(|(block, _)| block.invisible)
     }
 
+    fn replacement_resource(&self) -> Option<&str> {
+        self.font_resource.as_deref().or_else(|| {
+            (self.is_ocr() && !self.family_chosen && self.look.family == self.look0.family).then_some(self.ocr_default_resource.as_deref()).flatten()
+        })
+    }
+
     /// What Format text's font list shows: the chosen page font, a standard family picked
     /// instead, or the paragraph's own font (its `/BaseFont` without the subset tag).
     pub(crate) fn font_shown(&self, sources: &[(String, String)]) -> String {
-        if let Some(face) = self.font_resource.as_ref().and_then(|r| sources.iter().find(|(res, _)| res == r)).map(|(_, face)| face) {
+        if let Some(face) = self.replacement_resource().and_then(|r| sources.iter().find(|(res, _)| res == r)).map(|(_, face)| face) {
             return face.clone();
         }
         if self.look.family != self.look0.family || self.family_chosen {
@@ -1200,6 +1208,12 @@ fn open_editor(
     let source_lines = doc.text_lines(page);
     let text = l.editor_text.clone();
     let mut look = look_of(l);
+    let ocr_default = if l.invisible { doc.ocr_text_style(page) } else { Default::default() };
+    if let Some((family, bold, italic)) = ocr_default.family {
+        look.family = family;
+        look.bold = bold;
+        look.italic = italic;
+    }
     if l.invisible {
         look.size = finite_median(l.rows.first().into_iter().flatten().filter_map(|i| source_lines.get(*i)).map(|line| line.size), l.size);
     }
@@ -1212,6 +1226,7 @@ fn open_editor(
     view.line_editor = Some(LineEditor {
         selection: None,
         font_resource: None,
+        ocr_default_resource: ocr_default.resource,
         page,
         block,
         text: text.clone(),
@@ -1220,7 +1235,7 @@ fn open_editor(
         source_rect: l.rect.map(|v| v as f32),
         multiline: l.rows.len() > 1,
         source: Some((l.clone(), source_lines)),
-        fonts: install_source_fonts(ui.ctx(), doc, page),
+        fonts: install_source_fonts(ui.ctx(), doc, page, l.invisible),
         overflow: false,
         max_width,
         size: (l.size as f32 * scale).clamp(8.0, 72.0),
@@ -1388,8 +1403,8 @@ pub(crate) fn page_input(
 }
 
 /// One TextEdit lays out all source runs; its caret and selection span the whole region.
-pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::Document, page: usize) -> BTreeMap<String, String> {
-    let programs = doc.text_editor_fonts(page);
+pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::Document, page: usize, ocr: bool) -> BTreeMap<String, String> {
+    let programs = if ocr { doc.ocr_text_editor_fonts(page) } else { doc.text_editor_fonts(page) };
     let mut definitions = ctx.fonts(|f| f.definitions().clone());
     // Only the current editor's document fonts live in the atlas. Never accumulate the
     // programs of previously opened files or add them to the interface's default families.
@@ -1465,13 +1480,13 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
             let Some(line) = lines.get(index) else { continue };
             let mut look = source_look(&line.base_font, line.size, line.color, line.bold, line.italic);
             look.size = row_sizes.get(&index).copied().unwrap_or(line.size);
-            if ed.look.family != ed.look0.family || ed.family_chosen {
+            if block.invisible || ed.look.family != ed.look0.family || ed.family_chosen {
                 look.family = ed.look.family;
             }
-            if ed.look.bold != ed.look0.bold {
+            if block.invisible || ed.look.bold != ed.look0.bold {
                 look.bold = ed.look.bold;
             }
-            if ed.look.italic != ed.look0.italic {
+            if block.invisible || ed.look.italic != ed.look0.italic {
                 look.italic = ed.look.italic;
             }
             if ed.look.color != ed.look0.color {
@@ -1483,8 +1498,9 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
             let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
             let original_face =
                 ed.look.family == ed.look0.family && !ed.family_chosen && ed.look.bold == ed.look0.bold && ed.look.italic == ed.look0.italic;
-            let embedded = original_face && ed.fonts.contains_key(&line.font);
-            if embedded && let Some(name) = ed.fonts.get(&line.font) {
+            let resource = if block.invisible { ed.replacement_resource() } else { original_face.then_some(line.font.as_str()) };
+            let embedded = resource.and_then(|resource| ed.fonts.get(resource));
+            if let Some(name) = embedded {
                 font.family = FontFamily::Name(name.clone().into());
             }
             let native_width = ui.fonts_mut(|f| f.layout_no_wrap(line.text.clone(), font.clone(), Color32::BLACK).size().x);
@@ -1501,7 +1517,7 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
                     font_id: font,
                     extra_letter_spacing: spacing + ed.extras.char_spacing as f32 * scale,
                     color: color32(look.color),
-                    italics: look.italic && !embedded,
+                    italics: look.italic && embedded.is_none(),
                     ..Default::default()
                 },
             );
@@ -1843,7 +1859,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.begin_pass(Default::default());
         let doc = app.session.get(id).unwrap();
-        ed.fonts = install_source_fonts(&ctx, doc, 0);
+        ed.fonts = install_source_fonts(&ctx, doc, 0, false);
         assert_eq!(ed.fonts.len(), 1);
         ed.text = "AB".into();
         let mut background = TextBackground::default();
@@ -1897,6 +1913,7 @@ mod tests {
         let ed = LineEditor {
             selection: None,
             font_resource: None,
+            ocr_default_resource: None,
             page: 0,
             block: 0,
             text: block.text.clone(),

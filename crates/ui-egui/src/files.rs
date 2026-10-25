@@ -96,7 +96,7 @@ impl PdfCraftApp {
                 && let Some(ed) = &mut view.line_editor
                 && let Some(doc) = self.session.get(view.id)
             {
-                ed.fonts = crate::edit_text_ui::install_source_fonts(ctx, doc, ed.page);
+                ed.fonts = crate::edit_text_ui::install_source_fonts(ctx, doc, ed.page, ed.is_ocr());
                 if catalogue_changed {
                     view.text_background = Default::default();
                 }
@@ -578,7 +578,7 @@ impl PdfCraftApp {
                 } else if let Some(doc) = self.session.get(id)
                     && let Some(ctx) = ctx
                 {
-                    ed.fonts = crate::edit_text_ui::install_source_fonts(&ctx, doc, page);
+                    ed.fonts = crate::edit_text_ui::install_source_fonts(&ctx, doc, page, ed.is_ocr());
                     self.views[index].line_editor = Some(ed);
                 }
             }
