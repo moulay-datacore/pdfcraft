@@ -1119,33 +1119,35 @@ fn interpret(
                 layers.pop();
                 if let Some(Some((start, open, logical))) = actual.pop() {
                     let tail = out.split_off(start.min(out.len()));
-                    let mut items = tail.into_iter();
-                    if let Some(mut first) = items.next() {
-                        for shown in items {
-                            first.glyph_count = first.glyph_count.saturating_add(shown.glyph_count);
-                            first.extra_ops.push(shown.op);
-                            first.extra_ops.extend(shown.extra_ops);
-                            first.rect = [
-                                first.rect[0].min(shown.rect[0]),
-                                first.rect[1].min(shown.rect[1]),
-                                first.rect[2].max(shown.rect[2]),
-                                first.rect[3].max(shown.rect[3]),
-                            ];
-                            first.frame = union(first.frame, shown.frame);
-                            first.ink.extend(shown.ink);
+                    if tail.iter().any(|s| s.glyph_count > 0) {
+                        let mut items = tail.into_iter();
+                        if let Some(mut first) = items.next() {
+                            for shown in items {
+                                first.glyph_count = first.glyph_count.saturating_add(shown.glyph_count);
+                                first.extra_ops.push(shown.op);
+                                first.extra_ops.extend(shown.extra_ops);
+                                first.rect = [
+                                    first.rect[0].min(shown.rect[0]),
+                                    first.rect[1].min(shown.rect[1]),
+                                    first.rect[2].max(shown.rect[2]),
+                                    first.rect[3].max(shown.rect[3]),
+                                ];
+                                first.frame = union(first.frame, shown.frame);
+                                first.ink.extend(shown.ink);
+                            }
+                            first.extra_ops.extend([open, i]);
+                            // Only right-to-left ActualText is already in typing order and must stay
+                            // out of the line's bidi recovery. Word and Chrome wrap Latin ligatures
+                            // (`fi`, `fl`) in ActualText spans mid-word; those keep joining their line.
+                            first.logical_order = logical.chars().any(crate::bidi::is_rtl);
+                            first.actual_text = true;
+                            first.text = logical;
+                            first.start_x = first.rect[0];
+                            first.end_x = first.rect[2];
+                            first.end_y = first.baseline;
+                            first.advance = (first.end_x - first.start_x) / first.tm.then(&first.state.ctm).0[0].abs().max(1e-6);
+                            out.push(first);
                         }
-                        first.extra_ops.extend([open, i]);
-                        // Only right-to-left ActualText is already in typing order and must stay
-                        // out of the line's bidi recovery. Word and Chrome wrap Latin ligatures
-                        // (`fi`, `fl`) in ActualText spans mid-word; those keep joining their line.
-                        first.logical_order = logical.chars().any(crate::bidi::is_rtl);
-                        first.actual_text = true;
-                        first.text = logical;
-                        first.start_x = first.rect[0];
-                        first.end_x = first.rect[2];
-                        first.end_y = first.baseline;
-                        first.advance = (first.end_x - first.start_x) / first.tm.then(&first.state.ctm).0[0].abs().max(1e-6);
-                        out.push(first);
                     }
                 }
             }
@@ -1395,8 +1397,11 @@ fn interpret(
                     .collect();
                 let size_user = (trm0.0[2].powi(2) + trm0.0[3].powi(2)).sqrt() * ts.size;
                 // A numeric-only TJ adjusts the current text matrix but paints no glyphs.
-                // It must not create a phantom editable line or enlarge its neighbours' boxes.
-                if !pieces.iter().any(|p| matches!(p, Object::String(s) if !s.bytes.is_empty())) {
+                // Outside an `/ActualText` replacement it must not create a phantom editable
+                // line or enlarge its neighbours' boxes; inside one (such as a space gap in a
+                // subset font without a space glyph, #4229) it is part of the span's box and
+                // operators when the span also paints glyphs.
+                if !actual.iter().any(Option::is_some) && !pieces.iter().any(|p| matches!(p, Object::String(s) if !s.bytes.is_empty())) {
                     continue;
                 }
                 out.push(Shown {
@@ -1449,6 +1454,7 @@ fn interpret(
     carry.stack = stack;
     carry.marked = marked;
     carry.layers = layers;
+    out.retain(|s| s.glyph_count > 0 || s.actual_text);
     positioned_tracking(&mut out);
     Ok(out)
 }
@@ -2486,6 +2492,13 @@ fn source_show(metrics: &Metrics, text: &str, size: f64, space: f64, char_spacin
             out.push(Op::new("Tj", vec![Object::String(PdfString::literal(bytes))]));
         }
     }
+    if out.iter().any(|op| op.is("Tj")) {
+        let logical = crate::bidi::to_logical(&if metrics.visual_order { crate::indic::to_logical(text) } else { text.to_owned() });
+        let mut properties = Dict::new();
+        properties.set(b"ActualText".to_vec(), Object::String(PdfString::text(&logical)));
+        out.insert(0, Op::new("BDC", vec![Object::name("Span"), Object::Dict(properties)]));
+        out.push(Op::new("EMC", Vec::new()));
+    }
     Ok(out)
 }
 
@@ -3260,23 +3273,28 @@ fn rewrite_block_from(
         }
         // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
         let visual = crate::bidi::to_visual(shown);
-        // Stretched without word spacing: shown up to and including each space, then moved on.
-        let pieces = if stretch > 0.0 { visual.split_inclusive(' ').collect() } else { vec![visual.as_str()] };
-        for piece in pieces {
-            if let Some(metrics) = metrics.as_ref().filter(|_| reuse) {
-                let indic_piece = if metrics.visual_order { crate::indic::to_visual(piece) } else { piece.to_owned() };
-                block_ops.extend(source_show(metrics, &indic_piece, size, space, o_state.char_spacing, tw)?);
-            } else {
-                for (font, bytes) in encode(piece).ok_or_else(|| EditError::Invalid(format!("\"{line}\" can't be shown")))? {
-                    if font != shown_font {
-                        block_ops.push(Op::new("Tf", vec![Object::name(&font), n(size)]));
-                        shown_font = font;
+        if let Some(metrics) = metrics.as_ref().filter(|m| reuse && m.encode(" ").is_none()) {
+            let indic_line = if metrics.visual_order { crate::indic::to_visual(&visual) } else { visual };
+            block_ops.extend(source_show(metrics, &indic_line, size, space, o_state.char_spacing, tw + stretch)?);
+        } else {
+            // Stretched without word spacing: shown up to and including each space, then moved on.
+            let pieces = if stretch > 0.0 { visual.split_inclusive(' ').collect() } else { vec![visual.as_str()] };
+            for piece in pieces {
+                if let Some(metrics) = metrics.as_ref().filter(|_| reuse) {
+                    let indic_piece = if metrics.visual_order { crate::indic::to_visual(piece) } else { piece.to_owned() };
+                    block_ops.extend(source_show(metrics, &indic_piece, size, space, o_state.char_spacing, tw)?);
+                } else {
+                    for (font, bytes) in encode(piece).ok_or_else(|| EditError::Invalid(format!("\"{line}\" can't be shown")))? {
+                        if font != shown_font {
+                            block_ops.push(Op::new("Tf", vec![Object::name(&font), n(size)]));
+                            shown_font = font;
+                        }
+                        block_ops.push(Op::new("Tj", vec![Object::String(PdfString::literal(bytes))]));
                     }
-                    block_ops.push(Op::new("Tj", vec![Object::String(PdfString::literal(bytes))]));
                 }
-            }
-            if stretch > 0.0 && piece.ends_with(' ') {
-                block_ops.push(Op::new("TJ", vec![Object::Array(vec![n(-1000.0 * stretch / size)])]));
+                if stretch > 0.0 && piece.ends_with(' ') {
+                    block_ops.push(Op::new("TJ", vec![Object::Array(vec![n(-1000.0 * stretch / size)])]));
+                }
             }
         }
         let tw = tw + stretch;

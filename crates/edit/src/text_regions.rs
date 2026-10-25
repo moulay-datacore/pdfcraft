@@ -403,6 +403,34 @@ fn untouched_rows(block: &TextBlock, draft: &str, rows: &[std::ops::Range<usize>
         .collect()
 }
 
+/// Keep spaces in a subset without a space glyph attached to an adjacent glyph-bearing segment on
+/// the same row so `source_show` wraps them in one `/ActualText` span (#4229).
+fn assign_subset_space_fonts(row: &mut [(char, usize, String)], metrics: &std::collections::BTreeMap<String, Metrics>) {
+    let mut right_any = vec![None; row.len()];
+    let mut next_any: Option<(usize, String)> = None;
+    for (i, item) in row.iter().enumerate().rev() {
+        if item.0 != ' ' {
+            next_any = Some((item.1, item.2.clone()));
+        } else if let Some(slot) = right_any.get_mut(i) {
+            *slot = next_any.clone();
+        }
+    }
+    let mut prev_any: Option<(usize, String)> = None;
+    for (i, item) in row.iter_mut().enumerate() {
+        if item.0 != ' ' {
+            prev_any = Some((item.1, item.2.clone()));
+            continue;
+        }
+        if !metrics.get(&item.2).is_some_and(|m| m.encode(" ").is_none()) {
+            continue;
+        }
+        if let Some((style, font)) = prev_any.as_ref().or_else(|| right_any.get(i).and_then(Option::as_ref)) {
+            item.1 = *style;
+            item.2 = font.clone();
+        }
+    }
+}
+
 /// Rewrite visual rows while keeping the source style on each surviving character. Resource
 /// names may differ between Unicode subsets of the same face; encoding searches those subsets.
 pub(super) fn rewrite_styled_block(
@@ -836,6 +864,9 @@ pub(super) fn rewrite_styled_block(
     if !row.is_empty() {
         row_ranges.push(row_start..row_start + row.len());
         rows.push(row);
+    }
+    for row in &mut rows {
+        assign_subset_space_fonts(row, &metrics);
     }
     let streams = content_streams(doc, &p.dict)?;
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
