@@ -43,6 +43,12 @@ fn new_text_typed(v: &crate::DocView) -> bool {
     v.content.draft.as_ref().is_some_and(|d| d.index.is_none() && !d.text.trim().is_empty())
 }
 
+/// One translated sentence lets each language place the face names naturally.
+fn installed_font_notice(fonts: &[String]) -> Option<String> {
+    let fonts = fonts.join(", ");
+    (!fonts.is_empty()).then(|| crate::i18n::fmt(tl!("{fonts} from this computer"), &[("fonts", &fonts)]))
+}
+
 impl PdfCraftApp {
     /// Apply an edit to the active document. Returns `true` on success; failures are shown.
     pub fn apply_edit(&mut self, edit: Edit) -> bool {
@@ -183,11 +189,10 @@ impl PdfCraftApp {
                 if let Some(n) = self.session.get(id).and_then(|d| d.edit_notices.first()).cloned() {
                     self.notify(crate::content_ui::undrawn_message(&n));
                 }
-                if let Some(doc) = self.session.get(id) {
-                    let fonts = doc.installed_completions.join(", ");
-                    if !fonts.is_empty() {
-                        self.notify(format!("{} {}", fonts, tl!("from this computer")));
-                    }
+                if let Some(doc) = self.session.get(id)
+                    && let Some(message) = installed_font_notice(&doc.installed_completions)
+                {
+                    self.notify(message);
                 }
                 let out = self.session.take_js_output(id);
                 self.handle_js(id, out);
@@ -1248,6 +1253,22 @@ fn bookmark_at<'a>(items: &'a [pdfcraft_render::OutlineItem], path: &[usize]) ->
 #[cfg(test)]
 mod tests {
     use super::{SaveTarget, is_mail_temp_copy, save_dialog_folder, write_atomically, write_atomically_syncing, write_atomically_with};
+
+    #[test]
+    fn installed_font_notice_translates_the_whole_sentence() {
+        use crate::i18n::{Lang, current, set_current};
+        let previous = current();
+        let faces = ["Arial Bold".to_owned(), "Times New Roman".to_owned()];
+        set_current(Lang::EN);
+        let english = super::installed_font_notice(&faces);
+        set_current(Lang::from_code("fr").unwrap());
+        let french = super::installed_font_notice(&faces);
+        let empty = super::installed_font_notice(&[]);
+        set_current(previous);
+        assert_eq!(english.as_deref(), Some("Arial Bold, Times New Roman from this computer"));
+        assert_eq!(french.as_deref(), Some("Polices de cet ordinateur : Arial Bold, Times New Roman"));
+        assert_eq!(empty, None);
+    }
 
     #[test]
     fn save_dialogs_open_in_the_documents_folder() {

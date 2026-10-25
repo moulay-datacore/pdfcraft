@@ -96,7 +96,8 @@ pub fn named_font(family: &str, face: &str, fs_type: u16, extra: bool) -> Vec<u8
             be32(&mut cmap, n);
         }
     }
-    let names = [(1, family), (2, "Regular"), (6, face), (13, "MIT License")];
+    let full_name = format!("{family} Regular");
+    let names = [(1, family), (2, "Regular"), (4, full_name.as_str()), (6, face), (13, "MIT License")];
     let mut name = Vec::new();
     be16(&mut name, 0);
     be16(&mut name, names.len() as u16);

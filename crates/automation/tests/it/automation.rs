@@ -9125,12 +9125,12 @@ fn installed_matching_completion_through_tools_is_opt_in_and_confined() {
     let off = ok(&mut a, "text_edit_layout", json!({"doc":id,"page":1,"paragraph":1,"text":"AB"}));
     assert_eq!(off["installed_completions"], json!([]));
     let on = ok(&mut a, "text_edit_layout", json!({"doc":id,"page":1,"paragraph":1,"text":"AB","installed":true}));
-    assert_eq!(on["installed_completions"], json!(["RectFont-Regular"]));
+    assert_eq!(on["installed_completions"], json!(["Rect Font Regular"]));
     assert!(!a.session().has_text_font_catalogue(), "preview opt-in belongs to this call only");
     let listed = ok(&mut a, "text_fonts", json!({"doc":id,"page":1}));
     assert!(listed["fonts"].as_array().unwrap().iter().all(|f| f["preview_only"] != true));
     let edited = ok(&mut a, "text_edit", json!({"doc":id,"page":1,"paragraph":1,"text":"AB","installed":true}));
-    assert_eq!(edited["installed_completions"], json!(["RectFont-Regular"]));
+    assert_eq!(edited["installed_completions"], json!(["Rect Font Regular"]));
     assert!(!a.session().has_text_font_catalogue(), "edit opt-in belongs to this call only");
     let render = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
     assert!(render.iter().any(|c| matches!(c, Content::Png { .. })));

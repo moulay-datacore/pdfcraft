@@ -269,7 +269,7 @@ impl Catalogue {
                 }
                 budget = budget.saturating_sub(bytes.len());
                 seen.insert(font.file.face.clone());
-                programs.push((font.file.face.clone(), bytes));
+                programs.push((font.file.full_name.clone(), bytes));
                 break;
             }
         }

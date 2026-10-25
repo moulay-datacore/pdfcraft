@@ -112,12 +112,12 @@ fn matching_installed_subset_completion_is_atomic_and_portable() {
     let id = s.open("source.pdf", None, source.clone(), None).unwrap();
     s.set_text_font_catalogue(fonts);
     let style = BlockStyle::default();
-    assert_eq!(s.get(id).unwrap().matching_font_completions(0, 0, "AB", &style).unwrap(), vec!["RectFont"]);
+    assert_eq!(s.get(id).unwrap().matching_font_completions(0, 0, "AB", &style).unwrap(), vec!["Rect Font Regular"]);
     s.get(id).unwrap().text_edit_layout(0, 0, "AB", &style).unwrap();
     assert!(!s.get(id).unwrap().dirty);
     s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "AB".into(), style }).unwrap();
     let doc = s.get(id).unwrap();
-    assert_eq!(doc.installed_completions, vec!["RectFont"]);
+    assert_eq!(doc.installed_completions, vec!["Rect Font Regular"]);
     let lines = doc.text_lines(0);
     assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<String>(), "AB");
     assert!(lines.iter().all(|l| pdfcraft_fonts::embedding::same_face_name(&l.base_font, "RectFont-Regular")));
