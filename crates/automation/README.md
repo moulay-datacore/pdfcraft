@@ -231,7 +231,8 @@ restarts. Standalone engine/MCP sessions have no viewport, so they do not have a
 navigation-history tool; use the opt-in UI control channel to navigate the displayed document.
 
 Installed subset completion (Refs #2077, based on #1267 by @komo1iddin) uses an immutable,
-bounded `text_fonts::Catalogue` snapshot. Frontends opt in explicitly; paragraph automation
+metadata-only `text_fonts::Catalogue` snapshot. Frontends opt in explicitly; paragraph automation
 uses `installed: true` on each call and reports `installed_completions`. The catalogue is detached
 after every call, including failures; a later call needs its own opt-in. Font bytes are
-registered inside the text transaction; L4 performs no filesystem reads. Collections remain unsupported.
+registered inside the text transaction; L4 performs no filesystem reads. Collections are indexed per face (zero-based `face_index`); only the selected standalone
+program is embedded after full grant validation. Variable instances remain unsupported.

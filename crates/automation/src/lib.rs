@@ -669,10 +669,18 @@ impl Automation {
                 } else {
                     pdfcraft_engine::text_fonts::installed_directories()
                 };
-                json!({"fonts": pdfcraft_engine::text_fonts::discover(&roots, a.font_grant()?).into_iter().map(|f| json!({"path":f.path,"family":f.family,"font":f.face})).collect::<Vec<_>>()})
+                json!({"fonts": pdfcraft_engine::text_fonts::discover(&roots, a.font_grant()?).into_iter().map(|f| json!({"path":f.path,"family":f.family,"font":f.face,"full_name":f.full_name,"face_index":f.face_index})).collect::<Vec<_>>()})
             }
             "text_font_import" => {
                 let page = self.page(&a)?;
+                let face_index = match a.get("face_index") {
+                    None => 0,
+                    Some(index) => index
+                        .as_u64()
+                        .filter(|n| *n < 256)
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| ToolError::InvalidArgs("face_index must be a zero-based font face number from 0 to 255".into()))?,
+                };
                 let path = self.resolve(a.str("path")?, false)?;
                 let file = std::fs::File::open(&path).map_err(failed)?;
                 use std::io::Read;
@@ -681,6 +689,8 @@ impl Automation {
                 if bytes.len() > 16 << 20 {
                     return Err(ToolError::InvalidArgs("font input exceeds 16 MiB".into()));
                 }
+
+                let bytes = pdfcraft_engine::text_fonts::standalone_face(&bytes, face_index).map_err(failed)?;
                 let before: Vec<_> = self.doc(&a)?.text_editor_fonts(page).into_iter().map(|f| f.resource).collect();
                 let mut out = self.apply(&a, Edit::RegisterTextFont { page, bytes: Arc::new(bytes), grant: a.font_grant()? })?;
                 let added = self

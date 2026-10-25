@@ -15,6 +15,10 @@ pub enum FilePurpose {
     TextFont {
         page: usize,
     },
+    TextFontFace {
+        page: usize,
+        face_index: u32,
+    },
     Combine,
     InsertPages,
     ReplacePages,
@@ -106,8 +110,8 @@ impl PdfCraftApp {
 /// The picker for `purpose`: PDFs, and for Create and Insert also what they convert.
 fn files_picker(purpose: FilePurpose) -> rfd::AsyncFileDialog {
     let dialog = rfd::AsyncFileDialog::new();
-    if matches!(purpose, FilePurpose::TextFont { .. }) {
-        return dialog.add_filter("TrueType / OpenType font", &["ttf", "otf"]);
+    if matches!(purpose, FilePurpose::TextFont { .. } | FilePurpose::TextFontFace { .. }) {
+        return dialog.add_filter("TrueType / OpenType font", &["ttf", "otf", "ttc", "otc"]);
     }
     if purpose == FilePurpose::RedactWords {
         return dialog.add_filter(tl!("Text"), &["txt"]);
@@ -141,7 +145,7 @@ pub struct ReplaceDraft {
 impl FilePurpose {
     /// Insert and Replace edit the active document, at its selection.
     pub(crate) fn edits_active_document(self) -> bool {
-        matches!(self, Self::InsertPages | Self::ReplacePages | Self::TextFont { .. })
+        matches!(self, Self::InsertPages | Self::ReplacePages | Self::TextFont { .. } | Self::TextFontFace { .. })
     }
 }
 
@@ -429,7 +433,7 @@ impl PdfCraftApp {
                 self.notify_fmt("{name} is too large for a word list (at most 1 MB).", &[("name", &name)]);
                 return;
             }
-            let read = if matches!(purpose, FilePurpose::TextFont { .. }) {
+            let read = if matches!(purpose, FilePurpose::TextFont { .. } | FilePurpose::TextFontFace { .. }) {
                 use std::io::Read;
                 std::fs::File::open(p).and_then(|f| {
                     let mut bytes = Vec::new();
@@ -543,9 +547,16 @@ impl PdfCraftApp {
     /// Use picked files (also the entry point for tests and automation).
     pub fn use_files(&mut self, purpose: FilePurpose, files: Vec<(String, Vec<u8>)>) {
         match purpose {
-            FilePurpose::TextFont { page } => {
+            FilePurpose::TextFont { page } | FilePurpose::TextFontFace { page, .. } => {
                 let Some((_, bytes)) = files.into_iter().next() else { return };
-                let bytes = Arc::new(bytes);
+                let face_index = if let FilePurpose::TextFontFace { face_index, .. } = purpose { face_index } else { 0 };
+                let bytes = match pdfcraft_engine::text_fonts::standalone_face(&bytes, face_index) {
+                    Ok(bytes) => Arc::new(bytes),
+                    Err(message) => {
+                        self.notify(message);
+                        return;
+                    }
+                };
                 if !self.apply_edit(Edit::RegisterTextFont {
                     page,
                     bytes: bytes.clone(),

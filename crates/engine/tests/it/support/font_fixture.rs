@@ -148,3 +148,25 @@ pub fn named_font(family: &str, face: &str, fs_type: u16, extra: bool) -> Vec<u8
     out.extend(payload);
     out
 }
+
+/// Assemble contributor-original standalone fixtures into a collection, rebasing table offsets.
+pub fn collection(faces: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"ttcf\0\x01\0\0".to_vec();
+    be32(&mut out, u32::try_from(faces.len()).unwrap());
+    let mut offset = 12 + faces.len() * 4;
+    for face in faces {
+        be32(&mut out, u32::try_from(offset).unwrap());
+        offset += face.len();
+    }
+    for face in faces {
+        let mut face = face.clone();
+        let base = u32::try_from(out.len()).unwrap();
+        let count = u16::from_be_bytes(face.get(4..6).unwrap().try_into().unwrap());
+        for record in face.get_mut(12..12 + usize::from(count) * 16).unwrap().as_chunks_mut::<16>().0.iter_mut() {
+            let old = u32::from_be_bytes(record.get(8..12).unwrap().try_into().unwrap());
+            record.get_mut(8..12).unwrap().copy_from_slice(&(old + base).to_be_bytes());
+        }
+        out.extend(face);
+    }
+    out
+}

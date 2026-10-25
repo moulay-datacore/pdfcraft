@@ -323,3 +323,108 @@ fn installed_font_preview_reuses_one_paragraph_program_until_generation_changes(
     assert!(session.get(id).unwrap().text_font_preview_key().is_none(), "a changed document generation cannot use the previous paragraph preview");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn installed_collection_faces_are_permission_gated_and_save_only_selected_program() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-collection-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let restricted = support::font_fixture::named_font("Rect Font", "RectFont-Regular", 2, true);
+    let permitted = support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true);
+    let sibling = support::font_fixture::named_font("Sibling Marker", "SiblingOnly-Regular", 0, true);
+    let collection = support::font_fixture::collection(&[restricted, permitted, sibling]);
+    std::fs::write(dir.join("faces.ttc"), &collection).unwrap();
+    let fonts = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
+    let files: Vec<_> = fonts.files().collect();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|f| f.face_index != 0), "restricted collection face must never be listed");
+    let selected_name = files.iter().find(|f| f.face_index == 1).unwrap().full_name.clone();
+    let mut session = Session::new();
+    let id = session.open("source.pdf", None, support::source_subset::source_subset(), None).unwrap();
+    session.set_text_font_catalogue(fonts);
+    session.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "AB".into(), style: BlockStyle::default() }).unwrap();
+    let doc = session.get(id).unwrap();
+    assert_eq!(doc.installed_completions, vec![selected_name]);
+    assert_eq!(doc.text_blocks(0)[0].text, "AB");
+    let programs = doc.text_editor_fonts(0);
+    let selected = programs.iter().find(|f| f.resource.starts_with("PCFull")).unwrap();
+    assert_ne!(selected.bytes, collection);
+    assert_ne!(selected.bytes.get(..4), Some(b"ttcf".as_slice()));
+    let sibling_marker: Vec<_> = "SiblingOnly".encode_utf16().flat_map(u16::to_be_bytes).collect();
+    assert!(!selected.bytes.windows(sibling_marker.len()).any(|w| w == sibling_marker));
+    let saved = session.save_bytes(id).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let mut reopened = Session::new();
+    let next = reopened.open("saved.pdf", None, saved, None).unwrap();
+    assert_eq!(reopened.get(next).unwrap().text_blocks(0)[0].text, "AB");
+    reopened.apply(next, Edit::EditTextBlock { page: 0, block: 0, text: "ABA".into(), style: BlockStyle::default() }).unwrap();
+    assert_eq!(reopened.get(next).unwrap().text_blocks(0)[0].text, "ABA");
+}
+
+#[test]
+fn collection_metadata_read_budget_is_cumulative_per_file() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-collection-read-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut face = support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true);
+    // The synthetic fixture stores name last, so harmless padding can extend just that table.
+    let count = usize::from(u16::from_be_bytes(face.get(4..6).unwrap().try_into().unwrap()));
+    let record = face.get_mut(12..12 + 16 * count).unwrap().as_chunks_mut::<16>().0.iter_mut().find(|r| r.get(..4) == Some(b"name")).unwrap();
+    let old_len = u32::from_be_bytes(record.get(12..16).unwrap().try_into().unwrap());
+    record.get_mut(12..16).unwrap().copy_from_slice(&(old_len + (192 << 10)).to_be_bytes());
+    face.resize(face.len() + (192 << 10), 0);
+    std::fs::write(dir.join("large-metadata.otc"), support::font_fixture::collection(&vec![face; 8])).unwrap();
+    let fonts = Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable);
+    assert!((1..8).contains(&fonts.files().count()), "the one MiB read allowance belongs to the whole file");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn collection_index_caps_faces_per_file() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-collection-file-face-caps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let face = support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true);
+    std::fs::write(dir.join("too-many.ttc"), support::font_fixture::collection(&vec![face.clone(); 257])).unwrap();
+    assert_eq!(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable).files().count(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn collection_index_caps_faces_across_the_catalogue() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-collection-total-face-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let face = support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true);
+    let collection = support::font_fixture::collection(&vec![face; 256]);
+    for index in 0..17 {
+        std::fs::write(dir.join(format!("{index}.ttc")), &collection).unwrap();
+    }
+    assert_eq!(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable).files().count(), 4096);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn installed_catalogue_skips_a_discovery_root_replaced_by_a_symlink() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-catalogue-parent-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = dir.join("fonts");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("font.otf"), support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true)).unwrap();
+    let catalogue = Arc::new(Catalogue::discover(std::slice::from_ref(&root), FontGrant::InstalledEmbeddable));
+    assert_eq!(catalogue.files().count(), 1);
+    let moved = dir.join("moved");
+    std::fs::rename(&root, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &root).unwrap();
+    let mut session = Session::new();
+    let id = session.open("source.pdf", None, support::source_subset::source_subset(), None).unwrap();
+    session.set_text_font_catalogue(catalogue);
+    assert!(session.get(id).unwrap().matching_font_completions(0, 0, "AB", &BlockStyle::default()).unwrap().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}

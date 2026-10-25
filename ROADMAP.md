@@ -2,6 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7, Refs #2077 round 2: metadata-only installed-font indexing, cached paragraph coverage, call-scoped automation, readable notices and selected collection faces; estimates unchanged)
 > **Last reviewed:** 2026-10-23 | **Last updated:** 2026-10-23 | **Change:** minor (M8, #3205 follow-up: labelled Italian international phone numbers with a slash match whole; estimates unchanged)
 > **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (M7, #2636 partial: pasting added text boxes and images in the engine and through `content_copy`; estimates unchanged)
 > **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (M11: image optimization accounts for page-local UserUnit; estimates unchanged)
@@ -198,6 +199,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- 2026-10-25 — M7 review fixes (Refs #2077, based on #1267 by @komo1iddin): metadata-only indexing with lazy validation, bounded paragraph coverage/program caches, per-call automation opt-in, translated readable names, and selected .ttc/.otc faces. Native format/clippy/layers/assets and focused regressions pass; full tests retain sandbox/GPU exceptions and the WASM target is unavailable. Estimates unchanged.
 
 - 2026-10-25 — M7 candidate: opt-in installed subset matching ported from #1267 by @komo1iddin, using #4456’s embedding grant (Refs #2077); cached bounded discovery, desktop preference and paragraph tool reporting. Scoped core tests, layers and assets pass; full automation has one sandbox-blocked non-UTF-8 fixture test. Rustfmt/Clippy and a UI test dependency are unavailable locally; no readiness change.
 

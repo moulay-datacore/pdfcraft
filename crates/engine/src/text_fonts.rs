@@ -10,6 +10,8 @@ const MAX_TABLES: usize = 256;
 #[derive(Clone, Debug)]
 pub struct FontFile {
     pub path: PathBuf,
+    /// Zero-based face number within a collection; standalone fonts use zero.
+    pub face_index: u32,
     pub family: String,
     /// PostScript identity, used for matching PDF subset names.
     pub face: String,
@@ -17,6 +19,12 @@ pub struct FontFile {
     pub weight: u16,
     pub italic: bool,
     pub fs_type: Option<u16>,
+}
+
+/// Extract a selected font face behind the document-input panic guard. Frontends pass the
+/// returned program through their normal full grant validation before registration.
+pub fn standalone_face(bytes: &[u8], face_index: u32) -> Result<Vec<u8>, String> {
+    crate::guard(|| pdfcraft_fonts::embedding::standalone_face(bytes, face_index))?
 }
 
 /// Standard user-installed font folders. Frontends decide when and where to scan.
@@ -72,6 +80,7 @@ impl FileStamp {
 
 struct IndexedFont {
     file: FontFile,
+    root: PathBuf,
     metadata: DocumentFontMetadata,
     stamp: FileStamp,
 }
@@ -85,7 +94,8 @@ fn be32(data: &[u8], at: usize) -> Option<u32> {
 
 /// Read only the directory, name and OS/2 tables, never outlines or character maps.
 /// Repack the two small tables so the same skrifa parser/policy handles index and full input.
-fn read_metadata<R: Read + Seek>(file: &mut R, len: u64, grant: FontGrant) -> Option<DocumentFontMetadata> {
+fn read_metadata<R: Read + Seek>(file: &mut R, len: u64, at: u64, grant: FontGrant) -> Option<DocumentFontMetadata> {
+    file.seek(SeekFrom::Start(at)).ok()?;
     let mut header = [0; 12];
     file.read_exact(&mut header).ok()?;
     if header.get(..4) != Some(b"OTTO") && header.get(..4) != Some(&[0, 1, 0, 0]) {
@@ -143,13 +153,72 @@ fn read_metadata<R: Read + Seek>(file: &mut R, len: u64, grant: FontGrant) -> Op
     pdfcraft_fonts::embedding::document_metadata(&bytes, Some(grant)).ok()
 }
 
+/// One file may hold many faces. Count all directory and table reads against one budget.
+struct MetadataReader<R> {
+    input: R,
+    remaining: usize,
+}
+impl<R: Read> Read for MetadataReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let len = buf.len().min(self.remaining);
+        if len == 0 {
+            return Err(std::io::Error::other("font metadata read budget exceeded"));
+        }
+        let read = self.input.read(buf.get_mut(..len).ok_or_else(|| std::io::Error::other("invalid metadata read"))?)?;
+        self.remaining = self.remaining.saturating_sub(read);
+        Ok(read)
+    }
+}
+impl<R: Seek> Seek for MetadataReader<R> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.input.seek(position)
+    }
+}
+
+fn metadata_faces<R: Read + Seek>(input: R, len: u64, grant: FontGrant) -> Vec<(u32, DocumentFontMetadata)> {
+    let mut file = MetadataReader { input, remaining: MAX_TABLE_READS };
+    let mut header = [0; 12];
+    if file.read_exact(&mut header).is_err() {
+        return Vec::new();
+    }
+    let offsets = if header.get(..4) == Some(b"ttcf") {
+        if !matches!(be32(&header, 4), Some(0x0001_0000 | 0x0002_0000)) {
+            return Vec::new();
+        }
+        let Some(count) = be32(&header, 8).and_then(|n| usize::try_from(n).ok()).filter(|n| (1..=256).contains(n)) else {
+            return Vec::new();
+        };
+        let Some(size) = count.checked_mul(4) else { return Vec::new() };
+        let mut bytes = vec![0; size];
+        if file.read_exact(&mut bytes).is_err() {
+            return Vec::new();
+        }
+        bytes.as_chunks::<4>().0.iter().map(|b| u64::from(u32::from_be_bytes(*b))).collect::<Vec<_>>()
+    } else {
+        vec![0]
+    };
+    offsets
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, offset)| {
+            if offset.checked_add(12)? > len {
+                return None;
+            }
+            Some((u32::try_from(index).ok()?, read_metadata(&mut file, len, offset, grant)?))
+        })
+        .collect()
+}
+
 fn scan(roots: &[PathBuf], grant: FontGrant) -> Vec<IndexedFont> {
-    let mut pending: Vec<_> = roots.iter().take(16).rev().map(|r| (r.clone(), 0usize)).collect();
+    let mut pending: Vec<_> = roots.iter().take(16).rev().map(|r| (r.clone(), 0usize, r.clone())).collect();
     let mut files = Vec::new();
     let mut entries = 0usize;
     let mut seen = std::collections::HashSet::new();
-    while let Some((path, depth)) = pending.pop() {
-        if entries >= 4096 {
+    while let Some((path, depth, root)) = pending.pop() {
+        if entries >= 4096 || files.len() >= 4096 {
             break;
         }
         entries += 1;
@@ -162,7 +231,7 @@ fn scan(roots: &[PathBuf], grant: FontGrant) -> Vec<IndexedFont> {
                 let remaining = 4096usize.saturating_sub(entries.saturating_add(pending.len()));
                 let mut children: Vec<_> = children.take(remaining).filter_map(Result::ok).map(|p| p.path()).collect();
                 children.sort();
-                pending.extend(children.into_iter().rev().map(|p| (p, depth + 1)));
+                pending.extend(children.into_iter().rev().map(|p| (p, depth + 1, root.clone())));
             }
         } else if meta.is_file() && meta.len() <= MAX_FILE && font_extension(&path) {
             let Some(stamp) = FileStamp::new(&meta) else { continue };
@@ -170,24 +239,49 @@ fn scan(roots: &[PathBuf], grant: FontGrant) -> Vec<IndexedFont> {
             if input.metadata().ok().as_ref().and_then(FileStamp::new).as_ref() != Some(&stamp) {
                 continue;
             }
-            let Some(metadata) = read_metadata(&mut input, meta.len(), grant) else { continue };
-            let file = FontFile {
-                path,
-                family: metadata.family.clone(),
-                face: metadata.postscript.clone(),
-                full_name: metadata.full_name.clone(),
-                weight: metadata.weight,
-                italic: metadata.italic,
-                fs_type: metadata.fs_type,
-            };
-            files.push(IndexedFont { file, metadata, stamp });
+            for (face_index, metadata) in metadata_faces(&mut input, meta.len(), grant) {
+                if files.len() >= 4096 {
+                    break;
+                }
+                let file = FontFile {
+                    path: path.clone(),
+                    face_index,
+                    family: metadata.family.clone(),
+                    face: metadata.postscript.clone(),
+                    full_name: metadata.full_name.clone(),
+                    weight: metadata.weight,
+                    italic: metadata.italic,
+                    fs_type: metadata.fs_type,
+                };
+                files.push(IndexedFont { file, root: root.clone(), metadata, stamp: stamp.clone() });
+            }
         }
     }
-    files.sort_by(|a, b| a.file.face.cmp(&b.file.face).then(a.file.path.cmp(&b.file.path)));
+    files.sort_by(|a, b| a.file.face.cmp(&b.file.face).then(a.file.path.cmp(&b.file.path)).then(a.file.face_index.cmp(&b.file.face_index)));
     files
 }
+// A file's own stamp does not change when its parent directory moves. Recheck each
+// component below the original discovery root, so later loads cannot follow a replaced
+// directory symlink. Ancestors above an explicitly supplied root (e.g. macOS /var) stay valid.
+fn symlink_free_within(path: &Path, root: &Path) -> bool {
+    if !path.starts_with(root) {
+        return false;
+    }
+    let mut current = path;
+    loop {
+        if !std::fs::symlink_metadata(current).is_ok_and(|m| !m.file_type().is_symlink()) {
+            return false;
+        }
+        if current == root {
+            return true;
+        }
+        let Some(parent) = current.parent() else { return false };
+        current = parent;
+    }
+}
+
 fn font_extension(path: &Path) -> bool {
-    path.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
+    path.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| ["ttf", "otf", "ttc", "otc"].iter().any(|ext| e.eq_ignore_ascii_case(ext)))
 }
 
 /// An immutable snapshot of eligible installed paths and metadata, with no retained programs.
@@ -229,6 +323,9 @@ impl Catalogue {
 
     fn load(&self, font: &IndexedFont) -> Option<Vec<u8>> {
         let path = &font.file.path;
+        if !symlink_free_within(path, &font.root) {
+            return None;
+        }
         let meta = std::fs::symlink_metadata(path).ok()?;
         if !meta.is_file() || FileStamp::new(&meta).as_ref() != Some(&font.stamp) {
             return None;
@@ -239,10 +336,16 @@ impl Catalogue {
         }
         let mut bytes = Vec::new();
         (&mut input).take(MAX_FILE + 1).read_to_end(&mut bytes).ok()?;
-        if bytes.len() as u64 != font.stamp.size
+        if !symlink_free_within(path, &font.root)
+            || bytes.len() as u64 != font.stamp.size
             || FileStamp::new(&input.metadata().ok()?).as_ref() != Some(&font.stamp)
             || FileStamp::new(&std::fs::symlink_metadata(path).ok()?).as_ref() != Some(&font.stamp)
-            || pdfcraft_fonts::embedding::validate_document_input(&bytes, self.grant).is_err()
+        {
+            return None;
+        }
+        let bytes =
+            if bytes.get(..4) == Some(b"ttcf") || font.file.face_index != 0 { standalone_face(&bytes, font.file.face_index).ok()? } else { bytes };
+        if pdfcraft_fonts::embedding::validate_document_input(&bytes, self.grant).is_err()
             || pdfcraft_fonts::embedding::document_metadata(&bytes, Some(self.grant)).ok().as_ref() != Some(&font.metadata)
         {
             return None;
@@ -260,11 +363,8 @@ impl Catalogue {
                 if seen.contains(&font.file.face) {
                     break;
                 }
-                if font.stamp.size > budget as u64 {
-                    continue;
-                }
                 let Some(bytes) = self.load(font) else { continue };
-                if !pdfcraft_fonts::embedding::covers(&bytes, missing) {
+                if bytes.len() > budget || !pdfcraft_fonts::embedding::covers(&bytes, missing) {
                     continue;
                 }
                 budget = budget.saturating_sub(bytes.len());

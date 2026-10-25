@@ -18,7 +18,9 @@ that added item's old drawing removed, so deleted draft characters do not show u
 
 A subset font contains only some of the original face's glyphs. A new character cannot be
 reconstructed from a glyph the PDF does not contain. **Load font…** imports an openly licensed,
-embeddable standalone `.ttf` or `.otf` face. **Installed fonts…** discovers eligible user-installed
+embeddable `.ttf` or `.otf` face; a `.ttc`/`.otc` collection uses its first face in
+**Load font…**. **Installed fonts…** and automation `text_font_import.face_index` can select
+other collection faces (zero based). **Installed fonts…** discovers eligible user-installed
 faces on request, off the UI thread; the document-font menu selects resources already on the
 page. Select **Keep source fonts** to preserve each run's original face. A matching full face
 completes its subsets automatically, including new Chinese characters. When the PDF itself embeds
@@ -29,7 +31,7 @@ without a craft-fonts build says so. Replacement text takes the craft-fonts Japa
 they can draw all of it, and the bundled Inter face (`assets/fonts`) for the Latin, Greek and
 Cyrillic letters they lack (Uzbek `қизил`, Kazakh `әже`): that face needs no build input, so
 these work in every build, the web one included. Choosing another face
-is explicit. Fonts with restricted embedding, unsupported collections, excluded families or
+is explicit. Fonts with restricted embedding, excluded families or
 no open-licence declaration are refused. The desktop Format panel offers **Use matching fonts installed on this computer**, persisted
 and off by default. Paragraph automation calls `text_edit` and `text_edit_layout` opt in per call
 with `installed: true`. With this grant, a font without an open-licence declaration is then
@@ -47,9 +49,12 @@ source-face character coverage. Only a matched paragraph retains validated progr
 32 MiB), released when the editor closes or the document changes. New editor font families
 are installed after drawing so the next frame can use them. The UI reports the face “from this computer”; automation returns
 `installed_completions` for the requested paragraph (including layout previews). Automation scans
-only its permitted read root when confined. Collections (`.ttc`), variable instances and ambiguous
+only its permitted read root when confined. Collections (`.ttc`/`.otc`) are indexed and permission-checked per face; embedding repacks
+only the selected face, with corrected sfnt checksums. Variable instances and ambiguous
 or unrecognized style names remain unsupported. Turned text, Hebrew and visual-order Indic
-rewrites retain their existing single-face behavior and do not register or report installed completion. Discovery retains the 4096-entry cap, four-level depth cap and 16 MiB file cap. macOS includes `/System/Library/Fonts` and `Supplemental`.
+rewrites retain their existing single-face behavior and do not register or report installed completion. Discovery retains the 4096-entry cap, four-level depth cap and 16 MiB file cap. It also
+caps collections at 256 faces, the catalogue at 4096 faces and cumulative directory/table
+reads at 1 MiB per file. macOS includes `/System/Library/Fonts` and `Supplemental`.
 
 
 The full selected program, glyph mappings, widths and Unicode text are embedded in the PDF.

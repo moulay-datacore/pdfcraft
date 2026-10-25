@@ -161,6 +161,97 @@ pub fn validate_document_input(bytes: &[u8], grant: FontGrant) -> Result<(), Str
     document_metadata(bytes, Some(grant)).map(|_| ())
 }
 
+/// Extract one face of an OpenType collection into a bounded standalone sfnt program.
+/// Only the selected face's tables are copied; its DSIG is invalid after repacking and omitted.
+/// This does not grant embedding permission: validate the returned program with its grant.
+pub fn standalone_face(bytes: &[u8], face_index: u32) -> Result<Vec<u8>, String> {
+    use skrifa::raw::types::Tag;
+    const LIMIT: usize = 16 << 20;
+    const ERROR: &str = "the selected font collection has invalid tables or exceeds its budget";
+    if bytes.len() > LIMIT || face_index >= 256 {
+        return Err(ERROR.into());
+    }
+    if bytes.get(..4) == Some(b"ttcf") {
+        let count = bytes.get(8..12).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes).ok_or(ERROR)?;
+        if count == 0 || count > 256 {
+            return Err(ERROR.into());
+        }
+    }
+    let font = FontRef::from_index(bytes, face_index).map_err(|e| e.to_string())?;
+    let directory = font.table_directory();
+    if directory.num_tables() == 0 || directory.num_tables() > 256 {
+        return Err(ERROR.into());
+    }
+    if font.ttc_index().is_none() {
+        return Ok(bytes.to_vec());
+    }
+    let mut records: Vec<_> = directory.table_records().iter().filter(|r| r.tag() != Tag::new(b"DSIG")).collect();
+    records.sort_by_key(|r| r.tag());
+    if records.is_empty() || records.windows(2).any(|w| matches!(w, [a, b] if a.tag() == b.tag())) {
+        return Err(ERROR.into());
+    }
+    let count = u16::try_from(records.len()).map_err(|_| ERROR)?;
+    let selector = u16::BITS.saturating_sub(1).saturating_sub(count.leading_zeros());
+    let search_range = 1u16.checked_shl(selector).and_then(|n| n.checked_mul(16)).ok_or(ERROR)?;
+    let range_shift = count.checked_mul(16).and_then(|n| n.checked_sub(search_range)).ok_or(ERROR)?;
+    let directory_len = records.len().checked_mul(16).and_then(|n| n.checked_add(12)).ok_or(ERROR)?;
+    let mut out = Vec::with_capacity(directory_len);
+    out.extend_from_slice(&directory.sfnt_version().to_be_bytes());
+    out.extend_from_slice(&count.to_be_bytes());
+    out.extend_from_slice(&search_range.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(selector).map_err(|_| ERROR)?.to_be_bytes());
+    out.extend_from_slice(&range_shift.to_be_bytes());
+    out.resize(directory_len, 0);
+    let mut adjustment_offset = None;
+    for (i, record) in records.into_iter().enumerate() {
+        let tag = record.tag();
+        let data = font.table_data(tag).ok_or(ERROR)?;
+        let data = data.as_bytes();
+        let start = out.len();
+        let padded_len = data.len().checked_add(3).map(|n| n & !3).ok_or(ERROR)?;
+        let end = start.checked_add(padded_len).filter(|n| *n <= LIMIT).ok_or(ERROR)?;
+        out.extend_from_slice(data);
+        out.resize(end, 0);
+        if tag == Tag::new(b"head") {
+            if data.len() < 12 {
+                return Err(ERROR.into());
+            }
+            let start = start.checked_add(8).ok_or(ERROR)?;
+            let end = start.checked_add(4).ok_or(ERROR)?;
+            out.get_mut(start..end).ok_or(ERROR)?.fill(0);
+            adjustment_offset = Some(start);
+        }
+        let checksum = sfnt_checksum(out.get(start..end).ok_or(ERROR)?);
+        let entry = [
+            tag.to_be_bytes(),
+            checksum.to_be_bytes(),
+            u32::try_from(start).map_err(|_| ERROR)?.to_be_bytes(),
+            u32::try_from(data.len()).map_err(|_| ERROR)?.to_be_bytes(),
+        ];
+        let entry_start = i.checked_mul(16).and_then(|n| n.checked_add(12)).ok_or(ERROR)?;
+        let entry_end = entry_start.checked_add(16).ok_or(ERROR)?;
+        for (dst, src) in out.get_mut(entry_start..entry_end).ok_or(ERROR)?.as_chunks_mut::<4>().0.iter_mut().zip(entry) {
+            dst.copy_from_slice(&src);
+        }
+    }
+    let start = adjustment_offset.ok_or(ERROR)?;
+    let end = start.checked_add(4).ok_or(ERROR)?;
+    let adjustment = 0xb1b0_afbau32.wrapping_sub(sfnt_checksum(&out));
+    out.get_mut(start..end).ok_or(ERROR)?.copy_from_slice(&adjustment.to_be_bytes());
+    Ok(out)
+}
+
+/// sfnt checksums add big-endian words modulo 2^32; the last word is zero-padded.
+fn sfnt_checksum(bytes: &[u8]) -> u32 {
+    bytes.chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0; 4];
+        for (dst, src) in word.iter_mut().zip(chunk) {
+            *dst = *src;
+        }
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
+}
+
 /// Validate before allocating any PDF objects, so an invalid font cannot partly mutate a doc.
 pub fn validate(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > 16 << 20 {
@@ -433,6 +524,80 @@ fn same_resource(doc: &Document, fonts: &Dict, name: &str, programs: &mut Progra
 mod tests {
     use super::*;
     use crate::pdf::Metrics;
+
+    fn collection_extraction_fixture() -> Vec<u8> {
+        fn face(label: &[u8]) -> Vec<u8> {
+            let head = [0u8; 54];
+            let tables = [(*b"CFF ", label), (*b"DSIG", b"old-signature".as_slice()), (*b"head", head.as_slice())];
+            let mut bytes = b"OTTO\0\x03\0\x20\0\x01\0\x10".to_vec();
+            let mut data = Vec::new();
+            for (tag, value) in tables {
+                bytes.extend_from_slice(&tag);
+                bytes.extend_from_slice(&0u32.to_be_bytes());
+                bytes.extend_from_slice(&u32::try_from(60 + data.len()).unwrap().to_be_bytes());
+                bytes.extend_from_slice(&u32::try_from(value.len()).unwrap().to_be_bytes());
+                data.extend_from_slice(value);
+                while data.len() % 4 != 0 {
+                    data.push(0);
+                }
+            }
+            bytes.extend(data);
+            bytes
+        }
+        let faces = [face(b"FirstOnly"), face(b"SecondOnly")];
+        let mut collection = b"ttcf\0\x01\0\0\0\0\0\x02".to_vec();
+        let mut offset = 20usize;
+        for face in &faces {
+            collection.extend_from_slice(&u32::try_from(offset).unwrap().to_be_bytes());
+            offset += face.len();
+        }
+        for mut face in faces {
+            let base = u32::try_from(collection.len()).unwrap();
+            for record in face.get_mut(12..60).unwrap().as_chunks_mut::<16>().0.iter_mut() {
+                let offset = u32::from_be_bytes(record.get(8..12).unwrap().try_into().unwrap());
+                record.get_mut(8..12).unwrap().copy_from_slice(&(offset + base).to_be_bytes());
+            }
+            collection.extend(face);
+        }
+        collection
+    }
+
+    #[test]
+    fn collection_extraction_selects_one_face_and_rebuilds_sfnt_checksums() {
+        use skrifa::raw::types::Tag;
+        let collection = collection_extraction_fixture();
+        let selected = standalone_face(&collection, 1).unwrap();
+        let font = FontRef::new(&selected).unwrap();
+        assert_eq!(font.table_data(Tag::new(b"CFF ")).unwrap().as_bytes(), b"SecondOnly");
+        assert!(!selected.windows(b"FirstOnly".len()).any(|w| w == b"FirstOnly"));
+        assert!(font.table_data(Tag::new(b"DSIG")).is_none());
+        assert_eq!(sfnt_checksum(&selected), 0xb1b0_afba);
+        for record in font.table_directory().table_records() {
+            let mut table = font.table_data(record.tag()).unwrap().as_bytes().to_vec();
+            if record.tag() == Tag::new(b"head") {
+                table.get_mut(8..12).unwrap().fill(0);
+            }
+            assert_eq!(sfnt_checksum(&table), record.checksum());
+        }
+        let regular = standalone_face(&collection, 0).unwrap();
+        assert_eq!(FontRef::new(&regular).unwrap().table_data(Tag::new(b"CFF ")).unwrap().as_bytes(), b"FirstOnly");
+    }
+
+    #[test]
+    fn collection_extraction_rejects_bad_indexes_lengths_and_budgets() {
+        let collection = collection_extraction_fixture();
+        assert!(standalone_face(&collection, 2).is_err());
+        assert!(standalone_face(&[], 0).is_err());
+        assert!(standalone_face(&vec![0; (16 << 20) + 1], 0).is_err());
+        let mut bad_length = collection.clone();
+        // First face starts at 20, its first table record at 32; length is its fourth word.
+        bad_length.get_mut(44..48).unwrap().copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(standalone_face(&bad_length, 0).is_err());
+        let mut short_head = collection;
+        // The third table record starts at 64; make its head shorter than checkSumAdjustment.
+        short_head.get_mut(76..80).unwrap().copy_from_slice(&8u32.to_be_bytes());
+        assert!(standalone_face(&short_head, 0).is_err());
+    }
 
     #[test]
     fn installed_face_names_keep_family_weight_and_slant() {

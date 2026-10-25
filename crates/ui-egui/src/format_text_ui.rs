@@ -28,7 +28,7 @@ pub(crate) enum FontChoice {
     /// Load font…: pick a font file.
     Load,
     /// A font file installed on this computer.
-    Installed(std::path::PathBuf),
+    Installed(std::path::PathBuf, u32),
 }
 
 /// What the font list offers and shows.
@@ -111,8 +111,8 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, look: &mut AddedText, extras:
                     }
                     Some(list) => {
                         for font in list {
-                            if ui.button(&font.face).clicked() {
-                                out.font = Some(FontChoice::Installed(font.path));
+                            if ui.button(&font.full_name).clicked() {
+                                out.font = Some(FontChoice::Installed(font.path, font.face_index));
                                 ui.close();
                             }
                         }

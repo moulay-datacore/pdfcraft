@@ -99,4 +99,5 @@ metadata-only `text_fonts::Catalogue` snapshot (paths, names, style and permissi
 reads only capped metadata tables, without a cumulative font-size budget. Matched programs
 are loaded lazily and validated in full; changed or invalid files are skipped. Frontends opt in explicitly; paragraph automation
 uses `installed: true` on each call and reports `installed_completions`. Font bytes are
-registered inside the text transaction; L4 performs no filesystem reads. Collections remain unsupported.
+registered inside the text transaction; L4 performs no filesystem reads. Collections are indexed per face (zero-based `face_index`); only the selected standalone
+program is embedded after full grant validation. Variable instances remain unsupported.

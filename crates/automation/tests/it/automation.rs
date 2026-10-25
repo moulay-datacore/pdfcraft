@@ -9156,3 +9156,37 @@ fn installed_matching_catalogue_is_detached_after_failed_calls() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn font_collection_tools_select_and_embed_only_the_permitted_face() {
+    let dir = workdir("collection-font-tools");
+    let collection = font_fixture::collection(&[
+        font_fixture::named_font("Rect Font", "RectFont-Regular", 2, true),
+        font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true),
+    ]);
+    std::fs::write(dir.join("faces.ttc"), &collection).unwrap();
+    let mut automation = auto(&dir);
+    let listed = ok(&mut automation, "text_font_files", json!({"installed":true}));
+    let fonts = listed["fonts"].as_array().unwrap();
+    assert_eq!(fonts.len(), 1, "restricted sibling face is omitted: {listed}");
+    assert_eq!(fonts[0]["face_index"], 1);
+    assert!(!fonts[0]["full_name"].as_str().unwrap().is_empty());
+    let id = ok(&mut automation, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    assert!(automation.call("text_font_import", &json!({"doc":id,"page":1,"path":"faces.ttc","face_index":0,"installed":true})).is_err());
+    for face_index in [json!(-1), json!(256), json!("1")] {
+        assert!(matches!(
+            automation.call("text_font_import", &json!({"doc":id,"page":1,"path":"faces.ttc","face_index":face_index,"installed":true})),
+            Err(ToolError::InvalidArgs(_))
+        ));
+    }
+    let imported = ok(&mut automation, "text_font_import", json!({"doc":id,"page":1,"path":"faces.ttc","face_index":1,"installed":true}));
+    assert_eq!(imported["font"], "RectFont-Regular");
+    ok(&mut automation, "text_edit", json!({"doc":id,"page":1,"paragraph":1,"text":"AB","font_resource":imported["resource"]}));
+    ok(&mut automation, "doc_save", json!({"doc":id,"path":"collection-edited.pdf"}));
+    std::fs::remove_file(dir.join("faces.ttc")).unwrap();
+    let reopened = ok(&mut automation, "doc_open", json!({"path":"collection-edited.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut automation, "text_paragraphs", json!({"doc":reopened,"page":1}))["paragraphs"][0]["text"], "AB");
+    let rendered = automation.call("page_render", &json!({"doc":reopened,"page":1,"dpi":72})).unwrap();
+    assert!(rendered.iter().any(|c| matches!(c, Content::Png { .. })));
+    let _ = std::fs::remove_dir_all(dir);
+}

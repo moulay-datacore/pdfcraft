@@ -1917,6 +1917,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn installed_font_picker_selects_the_collection_face() {
+        let (mut app, mut editor) = preview_app();
+        app.match_installed_fonts = true;
+        editor.text = "AB".into();
+        app.views[0].line_editor = Some(editor);
+        let collection = font_fixture::collection(&[
+            font_fixture::named_font("Rect Font", "RectFont-Regular", 2, true),
+            font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true),
+        ]);
+        app.use_files(crate::files::FilePurpose::TextFontFace { page: 0, face_index: 0 }, vec![("faces.ttc".into(), collection.clone())]);
+        let id = app.views[0].id;
+        assert!(app.session.get(id).unwrap().text_editor_fonts(0).iter().all(|f| !f.resource.starts_with("PCFull")));
+        let dir = std::env::temp_dir().join(format!("pdfcraft-ui-collection-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("faces.ttc");
+        std::fs::write(&path, collection).unwrap();
+        app.use_paths(crate::files::FilePurpose::TextFontFace { page: 0, face_index: 1 }, &[path]);
+        std::fs::remove_dir_all(dir).unwrap();
+        let doc = app.session.get(id).unwrap();
+        assert_eq!(doc.text_blocks(0)[0].text, "AB");
+        let fonts = doc.text_editor_fonts(0);
+        let selected = fonts.iter().find(|f| f.resource.starts_with("PCFull")).unwrap();
+        assert_eq!(selected.face, "RectFont-Regular");
+        assert_ne!(selected.bytes.get(..4), Some(b"ttcf".as_slice()));
+    }
+
+    #[test]
     fn save_applies_the_paragraph_open_in_the_editor() {
         // Save wrote the file without the paragraph still open in the editor (#3496).
         let (mut app, mut ed) = preview_app();
