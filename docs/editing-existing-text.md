@@ -110,16 +110,43 @@ resource to `text_edit.font_resource`. `text_edit.ranges` holds selected range f
 `text_edit_layout` accepts resource/ranges too and measures a draft without applying it.
 All file inputs respect CLI root confinement; importing a font and applying text are undoable.
 
-On a scanned page, recognised text (Scan & OCR) is an invisible layer over the picture. Edit
-text groups it into phrases: words joined by a word space, with a table cell, a tab stop and each
-scanned line kept apart. Applying an edit draws the new text visibly in the scan's ink colour (or
-the one chosen) and first covers the old words with the paper colour sampled around them. Each
-word keeps its position and width, and a longer phrase grows rightwards rather than wrapping. The
-cover is one flat colour, and the text uses the layer's Helvetica, not the scanned typeface.
-This applies to any invisible text (rendering mode 3), not just a PdfCraft OCR layer: editing
-invisible text, such as another OCR tool's layer, makes the rewritten paragraph visible over a
-painted cover in the sampled paper colour. Edit text also groups invisible text differently: its lines never
-merge into multi-line paragraphs, and words split at gaps of 0.6 em or more.
+On a scanned page, recognised text (Scan & OCR) is an invisible layer over the picture.
+The Format panel says **Scanned text: the original font is part of the image** and labels
+the face picker **Replacement font**. Helvetica is the default replacement, not a claim
+about the printed typeface. Choose a standard family, a bundled/open face, a document font,
+or an installed face when **Use matching fonts installed on this computer** is on. Installed
+choices use the same `InstalledEmbeddable` permission checks as other text edits.
+For scans the face picker changes the whole block even when text is selected; size, colour
+and other selection formatting remain local to the selection. Automation range fonts do not
+change the document default; top-level `font` or `font_resource` does.
+
+Applying an edit covers each original word's pixels with the sampled paper colour and draws
+visible replacement text in the sampled ink colour (or the chosen colours). Each visual row
+uses the median source vertical font size and baseline, starts at the first word's left edge,
+and uses uniform, unskewed glyphs at 100% horizontal scale. Recognition's per-word stretched
+matrices and leading-space offsets are discarded. Text rewraps inside the block's width;
+explicit font size, spacing, alignment and width formatting still apply. Ordinary visible
+paragraphs retain their existing source-font and geometry behavior.
+
+An explicit OCR replacement face becomes the default for later OCR edits in that open document,
+including other pages. It is part of the engine's undo/redo state, applies to previews too,
+and changes only after a successful OCR font edit. Ordinary paragraphs and other open documents
+keep their own fonts. Deleting the original font’s page does not clear the choice. Save retains it in the open
+session; reopening the PDF or reverting
+starts without a remembered choice. The PDF contains the chosen font resources and visible edited
+text, but no preference setting. Layout previews never change the remembered face.
+
+Automation `text_paragraphs`, `text_edit` and `text_edit_layout` report `ocr` for the source block.
+Both edit tools accept standard `font` families (`helvetica`, `times`, `courier`), `font_resource`,
+and the existing per-call `installed: true` grant. Import an installed face with
+`text_font_import` before choosing its resource. Layout previews and commits use the same
+OCR defaults and layout; all font paths retain root confinement.
+
+This applies to any invisible text (rendering mode 3), including another OCR tool's layer.
+Words split at gaps of 0.6 em or more, and scanned rows remain separate edit blocks. The cover
+is one flat colour: textured/patterned paper, overlapping nearby rows after reflow, separating
+photographs from lettering, and automatic serif/sans or typeface detection from the image
+remain limitations. No automatic image-font matching is performed.
 
 Explicit marked paragraph/heading scopes prevent unrelated tagged regions from merging.
 Compatible geometry groups untagged content, including runs split across content streams

@@ -1,5 +1,7 @@
 # PdfCraft roadmap
 
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7: uniform OCR text editing and explicit session font choices; estimates unchanged)
+
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
 > **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7, Refs #2077 round 2: metadata-only installed-font indexing, cached paragraph coverage, call-scoped automation, readable notices and selected collection faces; estimates unchanged)
@@ -199,6 +201,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- 2026-10-25 — M7: OCR edits use uniform rows and an honest scanned-font notice, remember explicit replacement faces per document, and share layout/font choices with automation. Synthetic regressions cover save/reopen, undo/redo and root confinement. Native core tests, clippy, layers, assets and parity pass; full UI verification is limited by unavailable GPU/loopback access, and the offline WASM input is incomplete. Automatic image typeface detection remains missing. Estimates unchanged.
 
 - 2026-10-25 — M7 review fixes (Refs #2077, based on #1267 by @komo1iddin): metadata-only indexing with lazy validation, bounded paragraph coverage/program caches, per-call automation opt-in, translated readable names, and selected .ttc/.otc faces. Native format/clippy/layers/assets and focused regressions pass; full tests retain sandbox/GPU exceptions and the WASM target is unavailable. Estimates unchanged.
 

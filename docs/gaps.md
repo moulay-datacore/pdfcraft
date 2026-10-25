@@ -1,5 +1,7 @@
 # Where PdfCraft falls short of Acrobat Pro
 
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7: uniform OCR text editing and explicit session font choices; estimates unchanged)
+
 > **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (gap 6 #3673: Character encoding CJK mapping routes corrected; no readiness re-estimate)
 
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-19 · **Change:** minor (gap 2: composite fonts with `/ToUnicode /Identity-H` read as Unicode, hayro-interpret patch 44; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -80,6 +82,8 @@ update the numbers.
   **Doc:** [pdf-spec-parity.md](pdf-spec-parity.md).
 
 ### 3. Editing existing text is fragile on real files
+
+- **OCR progress (2026-10-25):** edited invisible recognition rows use uniform median-size typography, source baseline anchors and block-width wrapping. Explicit replacement faces are remembered per open document, isolated from native paragraphs and tracked by undo/redo. The UI identifies the printed face as image content; automation shares the font/layout rules and reports `ocr`. Automatic image typeface detection and textured-paper covers remain missing; estimates unchanged.
 
 - **Fork progress (2026-10-11):** compatible words and subset-font spaces form lines;
   source fonts lacking a space glyph remain reusable; inline editing previews remove source
@@ -398,6 +402,7 @@ update the numbers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | M7: OCR edits use uniform rows and an honest scanned-font notice, remember explicit replacement faces per document, and share layout/font choices with automation. Synthetic regressions cover save/reopen, undo/redo and root confinement; automatic image typeface detection remains missing. Estimates unchanged. |
 | 2026-10-19 | minor | Gap 2: a Type 0 font whose `/ToUnicode` is the name `/Identity-H` or `/Identity-V` (WSCAD) reads its codes as Unicode, so such pages have text to select, find and edit (hayro-interpret patch 44, `view.render-cid-fonts`). Estimates unchanged. |
 | 2026-10-15 | minor | Gap 21: the side-by-side view had already shipped; the Compare panel filters text changes and visual differences. Estimate 10–20 h → 8–16 h |
 | 2026-10-20 | minor | Gap 6 #3673: Character encoding accepts Identity-H/V with Adobe CJK collections, or a predefined non-Identity CMap; negative and indirect-reference regressions and a read-only automation test passed after failing before the fix. Per-glyph validation and embedded-font extraction remain separate. Scores and estimates unchanged. |
