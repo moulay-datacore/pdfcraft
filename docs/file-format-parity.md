@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-19 · **Change:** patch (`.p7b`/`.p7c` bundles read for trust import) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (OCR Languages: seven Latin-script languages, accents read in six) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 
 Every format Acrobat Pro reads or writes, and PdfCraft's support for it. Acrobat's list comes from
 its bundle's `Info.plist` `CFBundleDocumentTypes` (what it opens) and its public documentation
@@ -99,9 +99,9 @@ features total).
 
 | Capability | Acrobat | PdfCraft | Fidelity |
 |---|---|---|---|
-| Searchable image (invisible text layer) | yes | yes (Tr 3 text fitted to word boxes) | good for English |
+| Searchable image (invisible text layer) | yes | yes (Tr 3 text fitted to word boxes) | good for English; basic to good for the accented languages |
 | Editable text and images output | yes | no | none |
-| Languages | dozens (Latin with accents, Cyrillic, Greek, CJK, Arabic, Hebrew, Indic) | Latin without accents only (ocrs models) | **basic** (#744) |
+| Languages | dozens (Latin with accents, Cyrillic, Greek, CJK, Arabic, Hebrew, Indic) | English without accents (ocrs); French, German, Spanish, Italian, Portuguese, Dutch with accents (PP-OCRv6 small, about 21 MB more and 1.6× slower); a missing model reads as English and says so. No other script; Polish, Czech, Romanian, Turkish need a Unicode text layer first; no upside-down or 90-degree lines; faint text and stamps weak | **basic** (#744 Dutch now read) |
 | Deskew, rotation, despeckle, background and halo removal, descreen | yes | no | none |
 | Camera images (edges, perspective, whiteboard, card) | yes | no | none |
 | MRC (adaptive) compression, PDF/A output of scans | yes | no | none |
@@ -110,6 +110,7 @@ features total).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | OCR Languages row: English plus six accented Latin-script languages (PP-OCRv6 small), with the fallback to English reported; limits listed. |
 | 2026-10-19 | patch | Certificates row: `.p7b`/`.p7c` bundles (DER or PEM `PKCS7`/`CMS`) are read for trust import. |
 | 2026-10-12 | minor | XDP split into data (read and write for XFA forms, already shipped under `form.xfa-data`) and opening `.xdp` as a document (none). Create PDF reads BigTIFF; malformed GIF headers are no longer detected as images. |
 | 2026-10-11 | minor | #773: inferred tables have no invented borders; rotated or overlapping invoice pages use floating shapes and page sections. Full Office layout fidelity remains partial. |

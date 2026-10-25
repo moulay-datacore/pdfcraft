@@ -1,5 +1,7 @@
 # Where PdfCraft falls short of Acrobat Pro
 
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (gap 7: OCR reads French, German, Spanish, Italian, Portuguese and Dutch with their accents; estimate unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+
 > **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (gaps 5 and 14 current state: native release Hans face via LXGW WenKai Lite; Arabic logical catalog, explicit RTL direction and mirrored stock chrome, with native/browser/IME workflows unqualified; no readiness re-estimate)
 
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-19 · **Change:** minor (gap 2: composite fonts with `/ToUnicode /Identity-H` read as Unicode, hayro-interpret patch 44; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -39,7 +41,7 @@ update the numbers.
 | 3 | Editing existing text is fragile on real files | feature | 100–180 | [target-app-parity.md](target-app-parity.md) |
 | 5 | Chinese UI lacks a web glyph face | localization | 6–12 | [localization-parity.md](localization-parity.md) |
 | 6 | Open-issue backlog of wrong results in shipped features | stability | 45–80 | this file |
-| 7 | OCR reads only unaccented Latin | feature | 40–75 | [file-format-parity.md](file-format-parity.md) |
+| 7 | OCR reads seven Latin-script languages, no other script | feature | 40–75 | [file-format-parity.md](file-format-parity.md) |
 | 8 | Office export weak, Office import absent | file format | 55–100 | [file-format-parity.md](file-format-parity.md) |
 | 9 | No Preflight; PDF/A partial; PDF/X and PDF/UA absent | standards | 65–115 | [pdf-spec-parity.md](pdf-spec-parity.md) |
 | 10 | Signatures: no PKCS #11, timestamp servers or online revocation | feature, hardware | 40–70 | [pdf-spec-parity.md](pdf-spec-parity.md) |
@@ -161,17 +163,29 @@ update the numbers.
   (`AGENTS.md` §4).
 - **Estimate:** 45–80 h (≈ 0.2–0.4 h per issue). **Doc:** this file.
 
-### 7. OCR reads only unaccented Latin
+### 7. OCR reads seven Latin-script languages, no other script
 
-- **Missing:** every other script and accented Latin; editable-text output; deskew, rotation,
-  despeckle, background and camera clean-up; MRC compression; pluggable engines; OCR in the
-  browser; scanner input.
-- **Evidence:** `ocr.ocr-languages` partial ("the models read only the Latin alphabet without
-  accents"); 19 of 26 OCR features planned; [#744](https://github.com/storytold/pdfcraft/issues/744)
-  (Dutch). Acrobat ships on-device recognition for dozens of languages.
-- **Impact:** scanned documents are a core Pro workflow outside English.
-- **Estimate:** 40–75 h, partly blocked on openly licensed models. **Doc:**
-  [file-format-parity.md](file-format-parity.md).
+- **Current state:** English (ocrs, without accents) and French, German, Spanish, Italian,
+  Portuguese and Dutch with their accents (PaddleOCR's PP-OCRv6 small recognition model,
+  Apache-2.0; builds on #4659 by Francois C. N.). The Recognize Text dialog shows which languages
+  are ready, read as English or not installed, and opens in the user's last pick, else the
+  document's `/Lang`, else the interface language. A language whose model is missing is read as
+  English and says so before and after the run. Recognizing again can replace PdfCraft's own
+  earlier OCR text in one undo step.
+- **Missing:** every other script (Cyrillic, Greek, CJK, Arabic, Hebrew, Indic); Latin with
+  letters outside WinAnsi (Polish, Czech, Romanian, Turkish), which needs a text layer in a
+  Unicode font first; upside-down and 90-degree lines; reliable faint text and stamps;
+  editable-text output beyond editing the recognised words; deskew, rotation, despeckle,
+  background and camera clean-up; MRC compression; pluggable engines; OCR in the browser;
+  scanner input.
+- **Evidence:** `ocr.ocr-languages` partial (seven languages; accuracy varies with resolution,
+  e.g. œ read as oe); 19 of 26 OCR features planned;
+  [#744](https://github.com/storytold/pdfcraft/issues/744) (Dutch, now read). The PP-OCR model adds
+  about 21 MB to the packages and reads about 1.6× slower than English. Acrobat ships on-device
+  recognition for dozens of languages.
+- **Impact:** scanned documents are a core Pro workflow outside Western Europe.
+- **Estimate:** 40–75 h (unchanged: the other scripts and image clean-up dominate it), partly
+  blocked on openly licensed models. **Doc:** [file-format-parity.md](file-format-parity.md).
 
 ### 8. Office export weak, Office import absent
 
@@ -403,6 +417,7 @@ update the numbers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | Gap 7: OCR reads French, German, Spanish, Italian, Portuguese and Dutch with their accents (PP-OCRv6 small, Apache-2.0), with per-language state in the dialog, a remembered language, a fallback to English that is always reported, and replacing PdfCraft's own earlier OCR text. Still missing: other scripts, Latin outside WinAnsi, rotated lines, clean-up. Estimate unchanged. |
 | 2026-10-25 | minor | Gaps 5 and 14 current state: native release builds embed LXGW WenKai Lite for Simplified Chinese, while the web build has no Hans face; Arabic catalogs stay logical with explicit RTL label direction and mirrored stock chrome, while native/browser RTL input, IME and complex workflows remain unqualified. Estimates unchanged. |
 | 2026-10-19 | minor | Gap 2: a Type 0 font whose `/ToUnicode` is the name `/Identity-H` or `/Identity-V` (WSCAD) reads its codes as Unicode, so such pages have text to select, find and edit (hayro-interpret patch 44, `view.render-cid-fonts`). Estimates unchanged. |
 | 2026-10-15 | minor | Gap 21: the side-by-side view had already shipped; the Compare panel filters text changes and visual differences. Estimate 10–20 h → 8–16 h |
