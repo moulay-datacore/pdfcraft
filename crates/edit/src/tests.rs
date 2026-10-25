@@ -2823,12 +2823,12 @@ fn image_page_with(content: &str) -> Document {
 fn uneven_ocr_page() -> Document {
     image_page_with(
         "q 160 0 0 20 70 566 cm /Im0 Do Q \
-         /PCMark /OCR BDC BT /F1 1 Tf 3 Tr \
+         /PCMark /OCR BDC BT /F1 1 Tf 3 Tr 105 Tz \
          11.03 0 0 13.29 72 570 Tm (Lorem) Tj \
          11.34 0 0 11.25 108 570.4 Tm (ipsum) Tj \
-         10.69 0 0 12.03 140 569.6 Tm (dolor) Tj \
+         10.69 0 0 12.03 142 569.6 Tm (dolor) Tj \
          12 0 0 10.78 170 569.5 Tm (SITAMET) Tj ET EMC \
-         BT 0 Tr /F1 12 Tf 1 0 0 1 72 450 Tm (Keep this paragraph) Tj ET",
+         BT 0 Tr 100 Tz /F1 12 Tf 1 0 0 1 72 450 Tm (Keep this paragraph) Tj ET",
     )
 }
 
@@ -2860,22 +2860,80 @@ fn ocr_rewrite_uses_one_uniform_row_and_keeps_the_scan_cover() {
         );
         let ops = pdfcraft_content::parse(&page_content_bytes(&reopened, 0)).ops;
         let mut matrix = [0.0; 6];
+        let mut horizontal_scale = 100.0;
         let mut shown = Vec::new();
+        let mut scales = Vec::new();
         for op in &ops {
             if op.is("Tm") {
                 matrix = op.nums::<6>().unwrap();
             }
+            if op.is("Tz") {
+                horizontal_scale = op.nums::<1>().unwrap()[0];
+            }
             if op.is("Tj") || op.is("TJ") {
                 shown.push(matrix);
+                scales.push(horizontal_scale);
             }
         }
         assert_eq!(shown.len(), 2);
         assert_eq!(shown[0][0], shown[0][3]);
+        assert_eq!(scales[0], 100.0);
         assert_eq!((shown[0][1], shown[0][2]), (0.0, 0.0));
         // One padded cover path per source word, over the original pixels.
         assert_eq!(ops.iter().filter(|op| op.is("h")).count(), 4);
         assert_eq!(images::page_images(&reopened, 0).unwrap().len(), 1);
     }
+}
+
+#[test]
+fn ocr_rows_rewrap_to_the_block_width_with_uniform_metrics() {
+    let mut doc = uneven_ocr_page();
+    let source = text::text_blocks(&doc, 0).unwrap().remove(0);
+    let draft = "Other ipsum dolor SITAMET with more words after the recognised row";
+    let style = text::BlockStyle { cover: Some([1.0; 3]), ..Default::default() };
+    let layout = text::text_edit_layout(&doc, 0, 0, draft, &style).unwrap();
+    text::rewrite_block(&mut doc, 0, 0, Some(draft), &style).unwrap();
+    let reopened = reopen(&doc);
+    let rows: Vec<_> = text::text_lines(&reopened, 0).unwrap().into_iter().filter(|line| line.text != "Keep this paragraph").collect();
+    assert!(rows.len() >= 3, "OCR edits wrap at the recognised block, not at the page edge");
+    assert_eq!(rows.iter().map(|line| line.text.trim_end()).collect::<Vec<_>>().join(" "), draft);
+    for row in &rows {
+        assert!((row.size - 11.64).abs() < 0.001);
+        assert_eq!(row.baseline()[0], 72.0);
+        assert!(row.rect[2] <= source.rect[2] + 0.5);
+    }
+    assert!((rows[0].baseline()[1] - rows[1].baseline()[1] - 11.64 * 1.5).abs() < 0.001);
+    let bounds = rows.iter().map(|line| line.rect).reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]);
+    assert_eq!(layout.draft_rect, bounds);
+}
+
+#[test]
+fn ocr_uniform_metrics_cancel_the_page_graphics_transform() {
+    let mut doc = uneven_ocr_page();
+    // Keep the word gaps below OCR's table-cell threshold after anisotropic scaling too.
+    let old = String::from_utf8(page_content_bytes(&doc, 0)).unwrap();
+    let mut content = b"q 1.2 0 0 0.9 10 20 cm\n".to_vec();
+    content.extend_from_slice(old.as_bytes());
+    content.extend_from_slice(b"\nQ");
+    let stream = doc.add(Object::Stream(Stream::from_raw(Dict::new(), content)));
+    let page = pdfcraft_model::pages(&doc).remove(0);
+    doc.update_dict(page.obj, |page| page.set(b"Contents".to_vec(), Object::Ref(stream))).unwrap();
+    assert_eq!(text::text_blocks(&doc, 0).unwrap()[0].editor_text, "Lorem ipsum dolor SITAMET");
+    text::rewrite_block(&mut doc, 0, 0, Some("Other ipsum dolor SITAMET"), &text::BlockStyle::default()).unwrap();
+    let reopened = reopen(&doc);
+    let rows = text::text_lines(&reopened, 0).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].text, "Other ipsum dolor SITAMET");
+    assert!((rows[0].size - 10.476).abs() < 0.001);
+    assert!((rows[0].baseline()[0] - 96.4).abs() < 0.001);
+    assert!((rows[0].baseline()[1] - 532.82).abs() < 0.001);
+    // In page space the glyph height and horizontal advance have the same scale.
+    let ops = pdfcraft_content::parse(&page_content_bytes(&reopened, 0)).ops;
+    let show = ops.iter().position(|op| op.is("Tj") || op.is("TJ")).unwrap();
+    let tm = ops[..show].iter().rfind(|op| op.is("Tm")).unwrap().nums::<6>().unwrap();
+    let effective = pdfcraft_content::Matrix(tm).then(&pdfcraft_content::Matrix([1.2, 0.0, 0.0, 0.9, 10.0, 20.0])).0;
+    assert!((effective[0] - effective[3]).abs() < 0.0001);
+    assert_eq!((effective[1], effective[2]), (0.0, 0.0));
 }
 
 /// A path segment operator before any `m` (or `re`) has no subpath to extend: the image scan used
