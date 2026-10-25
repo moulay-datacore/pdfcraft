@@ -699,8 +699,9 @@ fn place_inside_wrapper(doc: &mut Document, page: &pdfcraft_model::Page, tag: &s
 
 /// Draw `content` on top of a page (0-based) as permanent page content, with standard Helvetica
 /// available as `/PCHelv`. The stream is tagged `tag` (not a mark kind, so Remove never takes
-/// it away); the original content is wrapped in q/Q first. Used for applied redaction boxes.
-/// Returns the new content stream.
+/// it away; an OCR text layer, tagged [`OCR_TAG`], is taken away only by
+/// [`remove_own_ocr_layers`]); the original content is wrapped in q/Q first. Used for applied
+/// redaction boxes and OCR text layers. Returns the new content stream.
 pub fn stamp(doc: &mut Document, page: usize, tag: &str, content: Vec<u8>) -> Result<ObjRef, EditError> {
     let all = page_list(doc);
     check(&[page], all.len())?;
@@ -971,52 +972,58 @@ pub fn remove_marks(doc: &mut Document, pages: &[usize], kind: MarkKind) -> Resu
     let all = page_list(doc);
     check(pages, all.len())?;
     let mut removed = 0;
-    for &i in pages {
-        let page = &all[i];
-        let list = contents(doc, page)?;
-        let before = list.len();
-        let mut kept: Vec<Object> = list.into_iter().filter(|o| stream_tag(doc, o).as_deref() != Some(kind.tag())).collect();
-        removed += before - kept.len();
-        // Strip only wrapper pairs whose close ends the list (after stripping the pairs after
-        // it): nothing comes after them to need the state they restore. Pairs come from the
-        // operators; for content that can't be read that precisely, from the wrapper streams
-        // alone, so updating a mark there doesn't nest another wrapper each time.
-        if before != kept.len() {
-            let wrappers = match isolation(doc, &kept) {
-                Isolation::Clean { wrappers, .. } => wrappers,
-                Isolation::Unknown { .. } | Isolation::TooDeep => {
-                    let mut opens = Vec::new();
-                    let mut pairs = Vec::new();
-                    for (i, o) in kept.iter().enumerate() {
-                        match wrapper_role(doc, o) {
-                            Some(true) => opens.push(i),
-                            Some(false) => pairs.extend(opens.pop().map(|open| (open, i))),
-                            None => {}
-                        }
-                    }
-                    pairs
-                }
-            };
-            let pairs: std::collections::HashMap<usize, usize> = wrappers.into_iter().map(|(open, close)| (close, open)).collect();
-            let mut discarded = std::collections::HashSet::new();
-            let mut end = kept.len();
-            while let Some(close) = end.checked_sub(1) {
-                if discarded.contains(&close) {
-                    end = close;
-                } else if let Some(&open) = pairs.get(&close) {
-                    discarded.insert(open);
-                    discarded.insert(close);
-                    end = close;
-                } else {
-                    break;
+    for page in pages.iter().filter_map(|&i| all.get(i)) {
+        removed += remove_streams(doc, page, |doc, o| stream_tag(doc, o).as_deref() == Some(kind.tag()))?;
+    }
+    Ok(removed)
+}
+
+/// Remove the content streams `remove` picks from `page`'s `/Contents`; returns how many were
+/// removed. Wrappers left with nothing after them go too, restoring the original content list;
+/// a wrapper that content after it still relies on (another tool's appended stream) stays.
+fn remove_streams(doc: &mut Document, page: &pdfcraft_model::Page, remove: impl Fn(&Document, &Object) -> bool) -> Result<usize, EditError> {
+    let list = contents(doc, page)?;
+    let before = list.len();
+    let mut kept: Vec<Object> = list.into_iter().filter(|o| !remove(doc, o)).collect();
+    let removed = before - kept.len();
+    if removed == 0 {
+        return Ok(0);
+    }
+    // Strip only wrapper pairs whose close ends the list (after stripping the pairs after
+    // it): nothing comes after them to need the state they restore. Pairs come from the
+    // operators; for content that can't be read that precisely, from the wrapper streams
+    // alone, so updating a mark there doesn't nest another wrapper each time.
+    let wrappers = match isolation(doc, &kept) {
+        Isolation::Clean { wrappers, .. } => wrappers,
+        Isolation::Unknown { .. } | Isolation::TooDeep => {
+            let mut opens = Vec::new();
+            let mut pairs = Vec::new();
+            for (i, o) in kept.iter().enumerate() {
+                match wrapper_role(doc, o) {
+                    Some(true) => opens.push(i),
+                    Some(false) => pairs.extend(opens.pop().map(|open| (open, i))),
+                    None => {}
                 }
             }
-            kept = kept.into_iter().enumerate().filter(|(i, _)| !discarded.contains(i)).map(|(_, o)| o).collect();
+            pairs
         }
-        if before != kept.len() {
-            doc.update_dict(page.obj, |d| d.set(b"Contents".to_vec(), Object::Array(kept)))?;
+    };
+    let pairs: std::collections::HashMap<usize, usize> = wrappers.into_iter().map(|(open, close)| (close, open)).collect();
+    let mut discarded = std::collections::HashSet::new();
+    let mut end = kept.len();
+    while let Some(close) = end.checked_sub(1) {
+        if discarded.contains(&close) {
+            end = close;
+        } else if let Some(&open) = pairs.get(&close) {
+            discarded.insert(open);
+            discarded.insert(close);
+            end = close;
+        } else {
+            break;
         }
     }
+    kept = kept.into_iter().enumerate().filter(|(i, _)| !discarded.contains(i)).map(|(_, o)| o).collect();
+    doc.update_dict(page.obj, |d| d.set(b"Contents".to_vec(), Object::Array(kept)))?;
     Ok(removed)
 }
 
@@ -1027,6 +1034,8 @@ pub fn marks_present(doc: &Document) -> Vec<MarkKind> {
 
 mod background;
 pub use background::page_background;
+mod ocr_layer;
+pub use ocr_layer::{OCR_TAG, OcrLayers, own_ocr_layers, remove_own_ocr_layers};
 pub mod objects;
 pub use objects::{EditableObject, MAX_MOVE_OBJECTS, ObjectKind, ObjectTarget, editable_objects, move_objects};
 
