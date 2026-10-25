@@ -12,8 +12,8 @@
 //!
 //! Every input is untrusted (the page pixels, and the model and dictionary files, which a user
 //! can point `PDFCRAFT_MODELS` at): the files are size-capped and checked against each other
-//! when loaded, every shape the model returns is checked, and memory is capped per batch and
-//! per page.
+//! when loaded, every shape the model returns is checked, and lines are cut out and read a
+//! batch at a time, within a memory budget, so a crowded page is read in full.
 
 #![deny(clippy::indexing_slicing)]
 
@@ -31,7 +31,7 @@ use rten_tensor::prelude::*;
 
 use decode::{greedy, snap, spans, words_of};
 use dict::Charset;
-use frame::{Crop, Gray, LineFrame, Margins, REC_HEIGHT, crop, direction, line_directions, oriented, split_at_gaps};
+use frame::{Crop, Gray, LineFrame, Margins, REC_HEIGHT, crop, crop_width, direction, line_directions, oriented, split_at_gaps};
 
 /// The narrowest batch PaddleOCR feeds (its `rec_image_shape` width); narrower crops are padded.
 const MIN_WIDTH: usize = 320;
@@ -39,9 +39,8 @@ const MIN_WIDTH: usize = 320;
 const MAX_BATCH: usize = 8;
 /// Model output floats per batch (64 MB): with PP-OCRv6's 18 710 classes, about 7000 px of
 /// line. A batch always holds at least one line, which the dictionary cap keeps below this.
+/// Lines are cut out a batch at a time, so a page's memory doesn't grow with its lines.
 const OUTPUT_BUDGET: usize = 16 << 20;
-/// The crop pixels made for one page at most (about 70 lines of 4000 px).
-const MAX_PAGE_PIXELS: usize = 14_000_000;
 /// A model file larger than this is refused unread (PP-OCRv6 small is 21 MB).
 const MAX_MODEL_BYTES: u64 = 256 << 20;
 /// A gap between two words wider than this many word heights splits the line.
@@ -208,33 +207,33 @@ impl Recognizer {
     /// Read the lines ocrs found in `image` (`OcrEngine::find_text_lines`: words left to right,
     /// lines in reading order). A line split at a wide gap gives several lines.
     pub(crate) fn recognize(&self, image: &Gray, lines: &[Vec<RotatedRect>]) -> Result<Vec<RecLine>, String> {
-        let crops = self.crops(image, lines);
-        let mut read: Vec<RecLine> = self.read(&crops)?.into_iter().flatten().filter(|l| l.confidence >= MIN_CONFIDENCE).collect();
+        let frames = self.frames(lines);
+        let mut read: Vec<RecLine> = self.read(image, frames)?.into_iter().flatten().filter(|l| l.confidence >= MIN_CONFIDENCE).collect();
         dedupe(&mut read);
         Ok(merge_fragments(read))
     }
 
-    /// Cut the lines out of `image`, split at wide gaps, each along its direction. Lines that
-    /// can't be framed are left out; a page's crops are capped at `MAX_PAGE_PIXELS` in all.
-    fn crops(&self, image: &Gray, lines: &[Vec<RotatedRect>]) -> Vec<Crop> {
+    /// The frames of the lines, split at wide gaps, each along its direction. Lines that can't
+    /// be framed, or cut out, are left out.
+    fn frames(&self, lines: &[Vec<RotatedRect>]) -> Vec<LineFrame> {
         let parts: Vec<Vec<RotatedRect>> = lines.iter().flat_map(|l| split_at_gaps(l, GAP_FACTOR)).map(|p| oriented(&p)).collect();
         let dirs: Vec<_> = parts.iter().map(|p| direction(p)).collect();
-        let mut budget = MAX_PAGE_PIXELS;
-        let mut out = Vec::new();
-        for (part, d) in parts.iter().zip(line_directions(&dirs)) {
-            let Some(c) = d.and_then(|d| LineFrame::along(part, d, Margins::default())).and_then(|f| crop(image, f)) else { continue };
-            let Some(left) = budget.checked_sub(c.pixels.len()) else { break };
-            budget = left;
-            out.push(c);
-        }
-        out
+        parts
+            .iter()
+            .zip(line_directions(&dirs))
+            .filter_map(|(part, d)| LineFrame::along(part, d?, Margins::default()))
+            .filter(|f| crop_width(f).is_some())
+            .collect()
     }
 
-    /// Read the crops, one entry per crop in order: `None` when nothing was read in it.
-    fn read(&self, crops: &[Crop]) -> Result<Vec<Option<RecLine>>, String> {
-        let mut order: Vec<usize> = (0..crops.len()).collect();
-        order.sort_by_key(|&i| crops.get(i).map_or(0, |c| c.width));
-        let mut out: Vec<Option<RecLine>> = vec![None; crops.len()];
+    /// Cut `frames` out of `image` and read them, a batch at a time, one entry per frame in
+    /// order: `None` when nothing was read in it.
+    fn read(&self, image: &Gray, frames: Vec<LineFrame>) -> Result<Vec<Option<RecLine>>, String> {
+        let widths: Vec<usize> = frames.iter().map(|f| crop_width(f).unwrap_or(0)).collect();
+        let mut frames: Vec<Option<LineFrame>> = frames.into_iter().map(Some).collect();
+        let mut order: Vec<usize> = (0..widths.len()).collect();
+        order.sort_by_key(|&i| widths.get(i).copied().unwrap_or(0));
+        let mut out: Vec<Option<RecLine>> = vec![None; widths.len()];
         let classes = self.charset.classes();
         let mut start = 0;
         while start < order.len() {
@@ -242,7 +241,7 @@ impl Recognizer {
             let mut end = start;
             let mut batch_w = MIN_WIDTH;
             while let Some(&i) = order.get(end) {
-                let w = crops.get(i).map_or(0, |c| c.width).max(batch_w).next_multiple_of(8);
+                let w = widths.get(i).copied().unwrap_or(0).max(batch_w).next_multiple_of(8);
                 let n = end.saturating_sub(start).saturating_add(1);
                 let cost = n.saturating_mul(w / 8).saturating_mul(classes);
                 if end > start && (n > MAX_BATCH || cost > OUTPUT_BUDGET) {
@@ -251,9 +250,11 @@ impl Recognizer {
                 batch_w = w;
                 end = end.saturating_add(1);
             }
+            // Cut out now, so only one batch's crops are in memory.
             let ids = order.get(start..end).unwrap_or(&[]);
-            let batch: Vec<&Crop> = ids.iter().filter_map(|&i| crops.get(i)).collect();
-            for (&i, line) in ids.iter().zip(self.read_batch(&batch, batch_w)?) {
+            let (ids, batch): (Vec<usize>, Vec<Crop>) = ids.iter().filter_map(|&i| Some((i, crop(image, frames.get_mut(i)?.take()?)?))).unzip();
+            let batch: Vec<&Crop> = batch.iter().collect();
+            for (i, line) in ids.into_iter().zip(self.read_batch(&batch, batch_w)?) {
                 if let Some(slot) = out.get_mut(i) {
                     *slot = line;
                 }

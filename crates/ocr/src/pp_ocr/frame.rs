@@ -305,10 +305,10 @@ pub(crate) struct Crop {
     pub frame: LineFrame,
 }
 
-/// Cut `frame` out of `image`, rotated level and scaled to [`REC_HEIGHT`] rows, at most
-/// [`MAX_WIDTH`] wide. When shrinking, each output pixel averages up to 4×4 bilinear samples,
-/// so thin strokes and accents survive the downscale. `None` for a frame without extent.
-pub(crate) fn crop(image: &Gray, frame: LineFrame) -> Option<Crop> {
+/// How wide `frame`'s crop is, in pixels: its length at the scale that makes it [`REC_HEIGHT`]
+/// rows high, from [`MIN_CROP_WIDTH`] to [`MAX_WIDTH`]. `None` for a frame without extent,
+/// which [`crop`] can't cut out either.
+pub(crate) fn crop_width(frame: &LineFrame) -> Option<usize> {
     let sy = REC_HEIGHT as f32 / frame.band;
     let w = (frame.length * sy).round();
     if !w.is_finite() || !sy.is_finite() || !above(sy, 0.0) || w < 1.0 {
@@ -317,9 +317,15 @@ pub(crate) fn crop(image: &Gray, frame: LineFrame) -> Option<Crop> {
     // A saturating cast, then clamped.
     let width = (w as usize).clamp(MIN_CROP_WIDTH, MAX_WIDTH);
     let sx = width as f32 / frame.length;
-    if !sx.is_finite() || !above(sx, 0.0) {
-        return None;
-    }
+    (sx.is_finite() && above(sx, 0.0)).then_some(width)
+}
+
+/// Cut `frame` out of `image`, rotated level and scaled to [`REC_HEIGHT`] rows, [`crop_width`]
+/// wide. When shrinking, each output pixel averages up to 4×4 bilinear samples, so thin strokes
+/// and accents survive the downscale. `None` for a frame without extent.
+pub(crate) fn crop(image: &Gray, frame: LineFrame) -> Option<Crop> {
+    let width = crop_width(&frame)?;
+    let (sx, sy) = (width as f32 / frame.length, REC_HEIGHT as f32 / frame.band);
     let k = |s: f32| ((1.0 / s).ceil() as usize).clamp(1, 4);
     let (kx, ky) = (k(sx), k(sy));
     let norm = 1.0 / (kx.saturating_mul(ky) as f32);

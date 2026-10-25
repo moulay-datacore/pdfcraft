@@ -113,9 +113,9 @@ fn a_word_in_the_overlap_of_two_crops_is_read_once() {
     let lines = [vec![detected(50, 150, y0, 0.0)], vec![detected(183, 283, y0, 0.0)]];
     let rec = reader();
     // Both crops take in the mark.
-    let crops = rec.crops(&img, &lines);
-    let covers = |c: &Crop, x: f32| (c.frame.point(0.0, 0.0)[0]..c.frame.point(c.frame.length, 0.0)[0]).contains(&x);
-    assert!(crops.len() == 2 && crops.iter().all(|c| covers(c, 169.0)));
+    let frames = rec.frames(&lines);
+    let covers = |f: &LineFrame, x: f32| (f.point(0.0, 0.0)[0]..f.point(f.length, 0.0)[0]).contains(&x);
+    assert!(frames.len() == 2 && frames.iter().all(|f| covers(f, 169.0)));
     let read = rec.recognize(&img, &lines).unwrap();
     let on_mark = |l: &[RecLine]| l.iter().flat_map(|l| &l.words).filter(|wd| (centre(&wd.quad)[0] - 169.0).abs() < 8.0).count();
     assert_eq!(on_mark(&read), 1, "{read:?}");
@@ -175,16 +175,35 @@ fn dedupe_prefers_the_snapped_then_the_confident_word() {
     assert_eq!(overlap(&q(0.0), &[[f32::NAN, 0.0]; 4]), 0.0);
 }
 
-/// A page's crops are capped: lines without end (or very many) stop being cut out once the
-/// page's crop pixels run out, rather than taking memory without bound.
+/// A crowded page is read in full, a batch at a time. Its crops used to be capped per page,
+/// which left the lines past the cap unread, and said nothing.
 #[test]
-fn a_page_s_crops_are_capped() {
-    let px = [255u8; 100];
-    let img = Gray::new(&px, 10, 10).unwrap();
-    let lines: Vec<Vec<RotatedRect>> = (0..80).map(|i| vec![word(5.0, i as f32 * 4.0, 1e9, 2.0, 0.0)]).collect();
-    let crops = reader().crops(&img, &lines);
-    assert!(crops.iter().all(|c| c.width == frame::MAX_WIDTH));
-    assert_eq!(crops.len(), MAX_PAGE_PIXELS / (frame::MAX_WIDTH * REC_HEIGHT));
+fn every_line_of_a_crowded_page_is_read_a_batch_at_a_time() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    /// Reads an "x" at every step, and keeps the size of the largest input it was given.
+    struct Counting(Arc<AtomicUsize>);
+    impl LineModel for Counting {
+        fn run(&self, input: NdTensor<f32, 4>) -> Result<Output, String> {
+            let [n, _, _, w] = input.shape();
+            self.0.fetch_max(input.len(), Ordering::Relaxed);
+            let steps = w / 8;
+            Ok(Output { shape: [n, steps, 4], data: (0..n * steps).flat_map(|_| [0.0, 0.97, 0.01, 0.02]).collect() })
+        }
+    }
+    // 200 lines of 3000 px: crops 4000 px wide, 38 million crop pixels in all.
+    let (w, h) = (3100, 6000);
+    let px = vec![255u8; w * h];
+    let img = Gray::new(&px, w, h).unwrap();
+    let lines: Vec<Vec<RotatedRect>> = (0..200).map(|i| vec![word(1550.0, 15.0 + i as f32 * 30.0, 3000.0, 20.0, 0.0)]).collect();
+    let largest = Arc::new(AtomicUsize::new(0));
+    let rec = Recognizer::with_model(Box::new(Counting(Arc::clone(&largest))), charset()).unwrap();
+    assert!(rec.frames(&lines).iter().all(|f| frame::crop_width(f) == Some(frame::MAX_WIDTH)));
+    let read = rec.recognize(&img, &lines).unwrap();
+    assert_eq!(read.len(), 200);
+    assert!(read.iter().all(|l| l.words.len() == 1 && l.words[0].text == "x"));
+    // Never more than one batch of crops at a time.
+    assert_eq!(largest.load(Ordering::Relaxed), MAX_BATCH * 3 * REC_HEIGHT * frame::MAX_WIDTH);
 }
 
 #[test]

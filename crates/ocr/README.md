@@ -53,8 +53,9 @@ back to English with the reason.
    (ocrs sometimes makes a few words a line of their own) joins it, in order.
 
 Every input is untrusted. The model and dictionary files are size-capped, and checked against
-each other and against the model contract when loaded. Every output shape is checked. Memory is
-capped per batch and per page. A panic inside ocrs or rten becomes an error for that page.
+each other and against the model contract when loaded. Every output shape is checked. Lines are
+cut out and read a batch at a time, within a memory budget, so a crowded page is read in full. A
+panic inside ocrs or rten becomes an error for that page.
 
 ## Adding a language
 
