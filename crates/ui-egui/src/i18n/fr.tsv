@@ -2812,3 +2812,7 @@ certificate	Version	Version
 	Only fonts permitting editable embedding are used. You are responsible for the font licence when sharing the PDF.	Seules les polices autorisant l’incorporation modifiable sont utilisées. Vous êtes responsable de leur licence lors du partage du PDF.
 	{fonts} from this computer	Polices de cet ordinateur : {fonts}
 	No eligible document fonts found. Load a font file.	Aucune police de document admissible trouvée. Charger un fichier de police.
+
+# Editing text over a scanned image
+	Scanned text: the original font is part of the image	Texte numérisé : la police d’origine fait partie de l’image
+	Replacement font	Police de remplacement

@@ -25,6 +25,8 @@ pub(crate) enum FontChoice {
     Resource(String),
     /// A standard family.
     Family(FontFamily),
+    /// An openly licensed face already bundled with the app.
+    Bundled(usize),
     /// Load font…: pick a font file.
     Load,
     /// A font file installed on this computer.
@@ -39,6 +41,27 @@ pub(crate) struct Fonts<'a> {
     /// The name the list shows for the current choice.
     pub shown: String,
     pub installed: bool,
+    /// The source font is only an invisible OCR placeholder.
+    pub scanned: bool,
+}
+
+/// Existing project fonts only; selecting one goes through the document font validator.
+pub(crate) fn bundled_fonts() -> &'static [(String, &'static [u8])] {
+    static FONTS: std::sync::OnceLock<Vec<(String, &'static [u8])>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        let mut fonts = vec![
+            ("Inter Regular".into(), pdfcraft_fonts::INTER_REGULAR),
+            ("Inter Medium".into(), include_bytes!("../../../assets/fonts/Inter-Medium.ttf").as_slice()),
+            ("Inter SemiBold".into(), include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf").as_slice()),
+            ("JetBrains Mono Regular".into(), include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf").as_slice()),
+            ("Dancing Script".into(), include_bytes!("../../../assets/fonts/DancingScript.ttf").as_slice()),
+        ];
+        fonts.extend(pdfcraft_fonts::CRAFT_FONTS.iter().map(|face| (face.name(), face.bytes)));
+        // The picker offers only faces the engine can actually embed, including its licence
+        // policy and static-font requirement. Inspect trusted bundled bytes once, without I/O.
+        fonts.retain(|(_, bytes)| pdfcraft_fonts::embedding::validate_document_input(bytes, pdfcraft_engine::FontGrant::OpenLicence).is_ok());
+        fonts
+    })
 }
 
 /// What the panel changed: the style (in place) and a font picked from the list.
@@ -76,6 +99,10 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, look: &mut AddedText, extras:
     let before = (look.clone(), extras.as_deref().copied());
     let mut out = Outcome::default();
     widgets::section_title(ui, tl!("Format text"));
+    if fonts.scanned {
+        ui.label(tl!("Scanned text: the original font is part of the image"));
+        ui.label(egui::RichText::new(tl!("Replacement font")).small().color(t.text_muted));
+    }
 
     // The font, across the panel.
     let width = ui.available_width();
@@ -84,7 +111,7 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, look: &mut AddedText, extras:
         .width(width)
         .show_ui(ui, |ui| {
             if let Some(sources) = fonts.sources {
-                if ui.selectable_label(false, tl!("Keep source fonts")).clicked() {
+                if !fonts.scanned && ui.selectable_label(false, tl!("Keep source fonts")).clicked() {
                     out.font = Some(FontChoice::KeepSource);
                 }
                 for (resource, face) in sources.iter().filter(|(r, _)| !r.starts_with("PCApproved")) {
@@ -101,26 +128,34 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, look: &mut AddedText, extras:
             }
             if fonts.sources.is_some() {
                 ui.separator();
+                for (index, (name, _)) in bundled_fonts().iter().enumerate() {
+                    if ui.selectable_label(false, name).clicked() {
+                        out.font = Some(FontChoice::Bundled(index));
+                    }
+                }
+                ui.separator();
                 if ui.selectable_label(false, tl!("Load font…")).clicked() {
                     out.font = Some(FontChoice::Load);
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                ui.menu_button(tl!("Installed fonts…"), |ui| match crate::files::installed_font_files(ui.ctx(), fonts.installed) {
-                    Some(list) if list.is_empty() => {
-                        ui.label(tl!("No eligible document fonts found. Load a font file."));
-                    }
-                    Some(list) => {
-                        for font in list {
-                            if ui.button(&font.full_name).clicked() {
-                                out.font = Some(FontChoice::Installed(font.path, font.face_index));
-                                ui.close();
+                if !fonts.scanned || fonts.installed {
+                    ui.menu_button(tl!("Installed fonts…"), |ui| match crate::files::installed_font_files(ui.ctx(), fonts.installed) {
+                        Some(list) if list.is_empty() => {
+                            ui.label(tl!("No eligible document fonts found. Load a font file."));
+                        }
+                        Some(list) => {
+                            for font in list {
+                                if ui.button(&font.full_name).clicked() {
+                                    out.font = Some(FontChoice::Installed(font.path, font.face_index));
+                                    ui.close();
+                                }
                             }
                         }
-                    }
-                    None => {
-                        ui.label(tl!("Finding document fonts…"));
-                    }
-                });
+                        None => {
+                            ui.label(tl!("Finding document fonts…"));
+                        }
+                    });
+                }
             }
         })
         .response
@@ -336,5 +371,18 @@ mod tests {
         assert_eq!(super::number(-0.5), "-0.5");
         assert_eq!(super::number(0.0), "0");
         assert_eq!(super::number(1.15), "1.15");
+    }
+}
+
+#[cfg(test)]
+mod bundled_font_tests {
+    #[test]
+    fn every_bundled_replacement_is_an_editable_open_face() {
+        let fonts = super::bundled_fonts();
+        assert!(fonts.iter().any(|(name, _)| name == "Inter Regular"));
+        for (name, bytes) in fonts {
+            assert_eq!(pdfcraft_fonts::embedding::validate_document_input(bytes, pdfcraft_engine::FontGrant::OpenLicence), Ok(()), "{name}");
+        }
+        assert!(fonts.iter().all(|(name, _)| name != "Dancing Script"), "variable instances remain unsupported");
     }
 }

@@ -547,12 +547,13 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             .map(|f| (f.resource, f.face))
             .collect();
         let shown = ed.font_shown(&sources);
+        let scanned = ed.is_ocr();
         let out = crate::format_text_ui::panel(
             ui,
             t,
             &mut ed.look,
             Some(&mut ed.extras),
-            Fonts { sources: Some(&sources), shown, installed: app.match_installed_fonts },
+            Fonts { sources: Some(&sources), shown, installed: app.match_installed_fonts, scanned },
         );
         let mut changed = out.changed;
         match out.font {
@@ -567,6 +568,11 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             Some(FontChoice::Family(family)) => {
                 ed.choose_family(family);
                 changed = true;
+            }
+            Some(FontChoice::Bundled(index)) => {
+                if let Some((name, bytes)) = crate::format_text_ui::bundled_fonts().get(index) {
+                    app.use_files(crate::files::FilePurpose::TextFont { page: ed.page }, vec![(name.clone(), bytes.to_vec())]);
+                }
             }
             Some(FontChoice::Load) => app.pick_files(crate::files::FilePurpose::TextFont { page: ed.page }, false),
             #[cfg(not(target_arch = "wasm32"))]
@@ -635,7 +641,8 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
 /// Format text for added text: the standard families, size, colour, style and alignment.
 fn added_text_format(ui: &mut egui::Ui, t: &Tokens, style: &mut pdfcraft_engine::AddedText) {
     let shown = style.family.label().to_string();
-    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown, installed: false });
+    let out =
+        crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown, installed: false, scanned: false });
     if let Some(crate::format_text_ui::FontChoice::Family(family)) = out.font {
         style.family = family;
     }

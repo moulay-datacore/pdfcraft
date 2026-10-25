@@ -292,6 +292,10 @@ impl Default for Extras {
 }
 
 impl LineEditor {
+    pub(crate) fn is_ocr(&self) -> bool {
+        self.source.as_ref().is_some_and(|(block, _)| block.invisible)
+    }
+
     /// What Format text's font list shows: the chosen page font, a standard family picked
     /// instead, or the paragraph's own font (its `/BaseFont` without the subset tag).
     pub(crate) fn font_shown(&self, sources: &[(String, String)]) -> String {
@@ -299,6 +303,9 @@ impl LineEditor {
             return face.clone();
         }
         if self.look.family != self.look0.family || self.family_chosen {
+            return self.look.family.label().to_string();
+        }
+        if self.is_ocr() {
             return self.look.family.label().to_string();
         }
         let base = self.source.as_ref().map(|(block, _)| block.base_font.as_str()).unwrap_or_default();
@@ -361,8 +368,7 @@ impl LineEditor {
             ..Default::default()
         };
         if let Some(range) = &self.selection
-            && (style.family.is_some()
-                || style.resource.is_some()
+            && ((!self.is_ocr() && (style.family.is_some() || style.resource.is_some()))
                 || style.size.is_some()
                 || style.color.is_some()
                 || style.underline.is_some()
@@ -371,8 +377,9 @@ impl LineEditor {
         {
             style.ranges.push(pdfcraft_engine::RangeStyle {
                 range: range.clone(),
-                family: style.family.take(),
-                resource: style.resource.take(),
+                // A scan's replacement face is one whole-block choice, including its document default.
+                family: if self.is_ocr() { None } else { style.family.take() },
+                resource: if self.is_ocr() { None } else { style.resource.take() },
                 size: style.size.take(),
                 color: style.color.take(),
                 underline: style.underline.take(),
@@ -1192,12 +1199,16 @@ fn open_editor(
     view.image_selection = None;
     let source_lines = doc.text_lines(page);
     let text = l.editor_text.clone();
+    let mut look = look_of(l);
+    if l.invisible {
+        look.size = finite_median(l.rows.first().into_iter().flatten().filter_map(|i| source_lines.get(*i)).map(|line| line.size), l.size);
+    }
     // Screen pixels per point, from the box's width.
     let scale = (b.width() - 4.0) / ((l.rect[2] - l.rect[0]).max(1.0) as f32);
     // How far the editor box may grow: a single-line paragraph's rewrite grows to the
     // page's right edge, a multi-line paragraph rewraps to its own width.
     let right = xf.rect.right().min(view.viewport_rect().right()) - 6.0;
-    let max_width = if l.rows.len() == 1 { (right - b.left()).max(b.width()) } else { b.width() };
+    let max_width = if l.rows.len() == 1 && !l.invisible { (right - b.left()).max(b.width()) } else { b.width() };
     view.line_editor = Some(LineEditor {
         selection: None,
         font_resource: None,
@@ -1215,8 +1226,8 @@ fn open_editor(
         size: (l.size as f32 * scale).clamp(8.0, 72.0),
         focus: true,
         had_focus: false,
-        look: look_of(l),
-        look0: look_of(l),
+        look: look.clone(),
+        look0: look,
         family_chosen: false,
         extras: Extras::default(),
         extras0: Extras::default(),
@@ -1412,6 +1423,15 @@ pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::D
     families
 }
 
+/// Finite source geometry only. The source inventory already bounds this vector's length.
+fn finite_median(values: impl Iterator<Item = f64>, fallback: f64) -> f64 {
+    let mut values: Vec<_> = values.filter(|value| value.is_finite()).collect();
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    let upper = values.get(middle).copied().unwrap_or(fallback);
+    if values.len() % 2 == 0 { values.get(middle.saturating_sub(1)).map_or(upper, |lower| lower / 2.0 + upper / 2.0) } else { upper }
+}
+
 fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     // An unchanged PDF row already has an authoritative line break. Do not rewrap it
@@ -1420,7 +1440,8 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
     if let Some((block, lines)) = &ed.source {
         let lefts: Vec<_> = block.rows.iter().filter_map(|r| r.first().and_then(|i| lines.get(*i)).map(|l| l.rect[0])).collect();
         let left_span = lefts.iter().copied().fold(f64::NEG_INFINITY, f64::max) - lefts.iter().copied().fold(f64::INFINITY, f64::min);
-        let centered = block.rows.len() > 1
+        let centered = !block.invisible
+            && block.rows.len() > 1
             && left_span > block.size * 0.5
             && block.rows.iter().all(|row| {
                 let rect = row
@@ -1433,10 +1454,17 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
         if centered {
             job.halign = egui::Align::Center;
         }
+        let mut row_sizes = BTreeMap::new();
+        if block.invisible {
+            for row in &block.rows {
+                let size = finite_median(row.iter().filter_map(|i| lines.get(*i)).map(|line| line.size), block.size);
+                row_sizes.extend(row.iter().map(|index| (*index, size)));
+            }
+        }
         for (range, index) in block.edited_spans(text) {
             let Some(line) = lines.get(index) else { continue };
             let mut look = source_look(&line.base_font, line.size, line.color, line.bold, line.italic);
-            look.size = line.size;
+            look.size = row_sizes.get(&index).copied().unwrap_or(line.size);
             if ed.look.family != ed.look0.family || ed.family_chosen {
                 look.family = ed.look.family;
             }
@@ -1461,7 +1489,11 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
             }
             let native_width = ui.fonts_mut(|f| f.layout_no_wrap(line.text.clone(), font.clone(), Color32::BLACK).size().x);
             let target_width = ((line.rect[2] - line.rect[0]) * look.size / line.size.max(0.01)) as f32 * scale;
-            let spacing = if original_face { (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32 } else { 0.0 };
+            let spacing = if original_face && !block.invisible {
+                (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32
+            } else {
+                0.0
+            };
             job.append(
                 text.get(range).unwrap_or_default(),
                 0.0,
@@ -1517,7 +1549,12 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: 
                 .filter_map(|i| lines.get(*i))
                 .map(|l| l.rect)
                 .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])?;
-            Some((first.baseline()[1], rect))
+            let baseline = if block.invisible {
+                finite_median(row.iter().filter_map(|i| lines.get(*i)).map(|line| line.baseline()[1]), first.baseline()[1])
+            } else {
+                first.baseline()[1]
+            };
+            Some((baseline, rect))
         })
         .collect();
     let Some((first_baseline, first_rect)) = sources.first().copied() else { return galley };
@@ -1638,8 +1675,8 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
             // The editor opens at the source size. Once text changes, show the real draft
             // extent: single rows grow toward the page edge, paragraphs rewrap at their
             // source width, and the visible frame grows/shrinks vertically with their rows.
-            // An OCR phrase (several stretched words on one scanned line) also grows rightwards.
-            let single_run = ed.source.as_ref().is_some_and(|(block, _)| block.rows.len() == 1 || block.invisible);
+            // OCR rows rewrap within the original text block.
+            let single_run = ed.source.as_ref().is_some_and(|(block, _)| block.rows.len() == 1 && !block.invisible);
             let width = if !ed.multiline && single_run && !ed.text.contains('\n') && ed.has_changes() {
                 let job = editor_job(ui, ed, &ed.text, scale, f32::INFINITY);
                 let natural = ui.fonts_mut(|f| f.layout_job(job)).size().x;
@@ -1881,6 +1918,67 @@ mod tests {
             extras0: Extras::default(),
         };
         (app, ed)
+    }
+
+    #[test]
+    fn ocr_face_choices_apply_to_the_block_even_with_a_selection() {
+        let (app, mut ed) = preview_app();
+        let doc = app.session.get(app.views[0].id).unwrap();
+        let mut block = doc.text_blocks(0).remove(0);
+        block.invisible = true;
+        ed.source = Some((block, doc.text_lines(0)));
+        ed.selection = Some(0..7);
+        ed.choose_family(pdfcraft_engine::FontFamily::Times);
+        let style = ed.style();
+        assert_eq!(style.family, Some((pdfcraft_engine::FontFamily::Times, false, false)));
+        assert!(style.ranges.is_empty());
+        ed.keep_source_font();
+        ed.font_resource = Some("ChosenFace".into());
+        let style = ed.style();
+        assert_eq!(style.resource.as_deref(), Some("ChosenFace"));
+        assert!(style.ranges.is_empty());
+        ed.source.as_mut().unwrap().0.invisible = false;
+        let ordinary = ed.style();
+        assert_eq!(ordinary.resource, None);
+        assert_eq!(ordinary.ranges[0].resource.as_deref(), Some("ChosenFace"));
+    }
+
+    #[test]
+    fn ocr_preview_uses_uniform_size_without_word_calibration() {
+        let (app, mut ed) = preview_app();
+        let doc = app.session.get(app.views[0].id).unwrap();
+        let mut lines = doc.text_lines(0);
+        let mut second = lines[0].clone();
+        lines[0].text = "Lorem".into();
+        lines[0].size = 10.0;
+        lines[0].rect = [20.0, 215.0, 50.0, 225.0];
+        second.text = "ipsum".into();
+        second.size = 16.0;
+        second.rect = [54.0, 215.0, 100.0, 231.0];
+        lines.push(second);
+        let mut block = doc.text_blocks(0).remove(0);
+        block.text = "Lorem ipsum".into();
+        block.editor_text = block.text.clone();
+        block.lines = vec![0, 1];
+        block.rows = vec![vec![0, 1]];
+        block.spans = vec![(0..5, 0), (5..11, 1)];
+        block.invisible = true;
+        ed.text = block.text.clone();
+        ed.original = ed.text.clone();
+        ed.source = Some((block, lines));
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let mut ui = egui::Ui::new(ctx.clone(), egui::Id::new("ocr-preview-test"), egui::UiBuilder::new());
+        egui::CentralPanel::default().show(&mut ui, |ui| {
+            let job = editor_job(ui, &ed, &ed.text, 1.0, 400.0);
+            assert_eq!(job.sections.len(), 1, "adjacent OCR words use one uniform style");
+            assert!(job.sections.iter().all(|section| section.format.font_id.size == 13.0));
+            assert!(job.sections.iter().all(|section| section.format.extra_letter_spacing == 0.0));
+            ed.source.as_mut().unwrap().0.invisible = false;
+            let ordinary = editor_job(ui, &ed, &ed.text, 1.0, 400.0);
+            assert_eq!(ordinary.sections.iter().map(|section| section.format.font_id.size).collect::<Vec<_>>(), [10.0, 16.0]);
+        });
+        ctx.end_pass().textures_delta.clear();
     }
 
     #[test]
