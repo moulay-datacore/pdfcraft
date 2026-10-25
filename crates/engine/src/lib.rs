@@ -28,6 +28,7 @@ pub mod field_table;
 pub mod js;
 pub mod links;
 pub mod ocr;
+mod ocr_font_suggest;
 mod ocr_text_font;
 pub mod optimizer;
 pub mod print_raster;
@@ -42,6 +43,7 @@ mod text_preview;
 pub mod word_count;
 pub mod xfa;
 
+pub use ocr_font_suggest::{OcrFontCandidate, OcrFontSuggestRequest, OcrFontSuggestion, bundled_text_fonts};
 pub use signature_image::{ImageSignaturePreview, SignatureImage};
 pub use signature_scan::{PhotoRect, ScanError, SignaturePhoto, Turn};
 pub use stamp_preview::StampPreview;

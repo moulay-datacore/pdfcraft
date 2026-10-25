@@ -315,6 +315,14 @@ impl Catalogue {
         self.fonts.iter().map(|font| &font.file)
     }
 
+    /// Reload only a face in this immutable snapshot, with the same confinement, stamp and
+    /// grant checks used for subset completion. Suggestions never discover paths themselves.
+    pub(crate) fn suggestion_program(&self, file: &FontFile) -> Option<Vec<u8>> {
+        let indexed =
+            self.fonts.iter().find(|font| font.file.path == file.path && font.file.face_index == file.face_index && font.file.face == file.face)?;
+        self.load(indexed)
+    }
+
     fn matching(&self, source: &str) -> impl Iterator<Item = &IndexedFont> {
         let key = pdfcraft_fonts::embedding::face_key(source);
         let family = pdfcraft_fonts::embedding::face_identity(source);
