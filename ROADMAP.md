@@ -1,5 +1,7 @@
 # PdfCraft roadmap
 
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7: bounded OCR image-font suggestions, desktop defaults and read-only automation; estimates unchanged)
+
 > **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7: uniform OCR text editing and explicit session font choices; estimates unchanged)
 
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
@@ -201,6 +203,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- **2026-10-25 (M7, OCR font suggestions):** Compare scanned-line ink with rendered bundled and opt-in installed faces, normalize to the ink box and rank by tolerant F-score. The Format panel preselects a confident match off-thread when no OCR face is remembered; `text_edit_layout` exposes read-only top-three scores. Blank/noise and rotated/scaled synthetic scans are covered. Textured covers, nearby-row overlap after reflow and broader scan fidelity remain limited; estimates unchanged.
 
 - 2026-10-25 — M7: OCR edits use uniform rows and an honest scanned-font notice, remember explicit replacement faces per document, and share layout/font choices with automation. Synthetic regressions cover save/reopen, undo/redo and root confinement. Native core tests, clippy, layers, assets and parity pass; full UI verification is limited by unavailable GPU/loopback access, and the offline WASM input is incomplete. Automatic image typeface detection remains missing. Estimates unchanged.
 
@@ -687,6 +691,7 @@ Newest first: the date, what moved, and the new overall estimate.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | M7: OCR image-font suggestions compare normalized ink, with bounded opt-in candidates, background desktop preselection and read-only automation metadata. Synthetic Inter, blank/noise and transform regressions cover matching; broader scan fidelity remains partial. Estimates unchanged. |
 | 2026-10-23 | minor | M8, #3205 follow-up: phone-pattern redaction includes the +39 country code on labelled Italian geographic numbers with a slash; dates, protocol identifiers and whole-run guards remain. Estimates unchanged. |
 | 2026-10-23 | minor | M11: image downsampling measures physical resolution after page-local UserUnit scaling, including shared nested forms; synthetic measurement and optimization regressions. Estimates unchanged. |
 | 2026-10-23 | minor | M10: Word table cells use the grid columns they span, including cells after a merged cell; synthetic export regression and CLI reproduction. Estimates unchanged. |

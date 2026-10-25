@@ -111,9 +111,11 @@ resource to `text_edit.font_resource`. `text_edit.ranges` holds selected range f
 All file inputs respect CLI root confinement; importing a font and applying text are undoable.
 
 On a scanned page, recognised text (Scan & OCR) is an invisible layer over the picture.
-The Format panel says **Scanned text: the original font is part of the image** and labels
-the face picker **Replacement font**. Helvetica is the default replacement, not a claim
-about the printed typeface. Choose a standard family, a bundled/open face, a document font,
+The Format panel suggests **Scanned text — closest font: {font}** when an image comparison
+finds a clear match, and labels the face picker **Replacement font**. It compares bundled
+faces and, with the installed-font option enabled, eligible installed faces. A confident
+suggestion preselects a replacement when this document has no remembered choice.
+Choose a standard family, a bundled/open face, a document font,
 or an installed face when **Use matching fonts installed on this computer** is on. Installed
 choices use the same `InstalledEmbeddable` permission checks as other text edits.
 For scans the face picker changes the whole block even when text is selected; size, colour
@@ -140,13 +142,22 @@ Automation `text_paragraphs`, `text_edit` and `text_edit_layout` report `ocr` fo
 Both edit tools accept standard `font` families (`helvetica`, `times`, `courier`), `font_resource`,
 and the existing per-call `installed: true` grant. Import an installed face with
 `text_font_import` before choosing its resource. Layout previews and commits use the same
-OCR defaults and layout; all font paths retain root confinement.
+OCR defaults and layout; all font paths retain root confinement. For OCR blocks,
+`text_edit_layout` also returns read-only `ocr_font_suggestion`: up to three candidates
+(`face`, `full_name`, `weight`, `italic`, `score`) and `confident`. A false `confident` means
+no clear match. Reading a suggestion never registers a font or changes the document.
 
 This applies to any invisible text (rendering mode 3), including another OCR tool's layer.
 Words split at gaps of 0.6 em or more, and scanned rows remain separate edit blocks. The cover
 is one flat colour: textured/patterned paper, overlapping nearby rows after reflow, separating
-photographs from lettering, and automatic serif/sans or typeface detection from the image
-remain limitations. No automatic image-font matching is performed.
+photographs from lettering remain limitations. Typeface suggestions are visual approximations,
+not proof of the original font. They compare a bounded scanned line against rendered OCR text,
+using Otsu binarization, blank-row ink bands and a one-pixel-tolerant ink F-score after stretching
+each candidate to the scan’s ink box. Natural text width does not affect the ranking. At most
+40 faces are compared within a cooperative three-second budget, with a crop capped at
+2048 × 256 pixels. Confidence requires a score of at least 0.80 and a gap of at least 0.015
+to the runner-up, with the selected comparisons complete. Work is cancellable; poor scans, incorrect OCR, unavailable faces and close scores can yield
+no clear match. Matching and the generation/page/block cache run off the desktop UI thread.
 
 Explicit marked paragraph/heading scopes prevent unrelated tagged regions from merging.
 Compatible geometry groups untagged content, including runs split across content streams

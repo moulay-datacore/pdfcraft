@@ -101,3 +101,9 @@ are loaded lazily and validated in full; changed or invalid files are skipped. F
 uses `installed: true` on each call and reports `installed_completions`. Font bytes are
 registered inside the text transaction; L4 performs no filesystem reads. Collections are indexed per face (zero-based `face_index`); only the selected standalone
 program is embedded after full grant validation. Variable instances remain unsupported.
+
+`Document::ocr_font_suggest(page, block)` compares a scanned OCR row with bundled and
+explicitly enabled installed faces, returning three visual scores and a confidence flag. It
+is read-only. Desktop callers move `ocr_font_suggest_request` to a worker and pass a
+cancellation flag to `run`; no image decoding or font-program reads occur when making the
+request. See [OCR font suggestions](../../docs/editing-existing-text.md) for bounds and limits.

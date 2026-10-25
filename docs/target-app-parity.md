@@ -1,5 +1,7 @@
 # PdfCraft parity with Adobe Acrobat Pro
 
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7: bounded OCR image-font suggestions, desktop defaults and read-only automation; estimates unchanged)
+
 > **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7: uniform OCR text editing and explicit session font choices; estimates unchanged)
 
 > **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (M12 #3673: Character encoding CJK mapping routes corrected; scores and estimates unchanged)
@@ -296,6 +298,7 @@ licensed OCR or AI model.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | M7: OCR image-font suggestions compare normalized ink, with bounded opt-in candidates, background desktop preselection and read-only automation metadata. Synthetic Inter, blank/noise and transform regressions cover matching; broader scan fidelity remains partial. Estimates unchanged. |
 | 2026-10-25 | minor | M7: OCR edits use uniform rows and an honest scanned-font notice, remember explicit replacement faces per document, and share layout/font choices with automation. Synthetic regressions cover save/reopen, undo/redo and root confinement; automatic image typeface detection remains missing. Estimates unchanged. |
 | 2026-10-20 | minor | M12 #3673: the Character encoding rule accepts Identity-H/V fonts with Adobe CJK collections, or a predefined non-Identity CMap, while rejecting unknown names and foreign registries. Synthetic checker and read-only automation regressions passed after failing before the fix; per-glyph mapping validation and embedded-font extraction remain separate. Breadth, readiness and hours unchanged. |
 | 2026-10-12 | minor | Exclusive image crops resize with their pixels across nested states, intervening operators and content streams; shared clips remain fixed. Synthetic engine/tool regressions and private image save/reopen checks; estimates unchanged. |
