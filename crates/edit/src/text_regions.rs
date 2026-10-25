@@ -403,6 +403,44 @@ fn untouched_rows(block: &TextBlock, draft: &str, rows: &[std::ops::Range<usize>
         .collect()
 }
 
+/// OCR boxes describe recognition geometry, not typography: use one ordinary face and size per
+/// visual row instead of inheriting each recognised word's stretch and spacing.
+fn uniform_ocr_lines(block: &TextBlock, lines: &[TextLine]) -> Result<Vec<TextLine>, EditError> {
+    let median = |mut values: Vec<f64>| {
+        values.retain(|v| v.is_finite());
+        values.sort_by(f64::total_cmp);
+        let middle = values.len() / 2;
+        let high = values.get(middle).copied()?;
+        Some(if values.len().is_multiple_of(2) { values.get(middle.checked_sub(1)?).copied()? / 2.0 + high / 2.0 } else { high })
+    };
+    let mut normalized = lines.to_vec();
+    for row in &block.rows {
+        let Some(first) = row.first().and_then(|i| lines.get(*i)) else { continue };
+        let members = || row.iter().filter_map(|i| lines.get(*i));
+        let size = median(members().map(|l| l.size).filter(|v| *v > 0.0).collect())
+            .ok_or_else(|| EditError::Invalid("the scanned row has no finite text height".into()))?;
+        let baseline = median(members().map(|l| l.origin.baseline).collect())
+            .ok_or_else(|| EditError::Invalid("the scanned row has no finite baseline".into()))?;
+        let left = first.rect[0];
+        for index in row {
+            let Some(line) = normalized.get_mut(*index) else { continue };
+            let inverse = Matrix(line.origin.ctm).invert().ok_or_else(|| EditError::Invalid("the scanned row has a singular transform".into()))?;
+            line.origin.tm = Matrix([1.0, 0.0, 0.0, 1.0, left, baseline]).then(&inverse).0;
+            line.origin.k = 1.0;
+            line.origin.x = left;
+            line.origin.baseline = baseline;
+            line.size = size;
+            line.origin.state.font = Some((first.font.clone(), size));
+            line.origin.state.scale = 1.0;
+            line.origin.state.char_spacing = 0.0;
+            line.origin.state.word_spacing = 0.0;
+            line.origin.state.rise = 0.0;
+            // Keep the source rectangles, ink boxes and operator locations for covering/removal.
+        }
+    }
+    Ok(normalized)
+}
+
 /// Rewrite visual rows while keeping the source style on each surviving character. Resource
 /// names may differ between Unicode subsets of the same face; encoding searches those subsets.
 pub(super) fn rewrite_styled_block(
@@ -414,6 +452,13 @@ pub(super) fn rewrite_styled_block(
     style: &BlockStyle,
     max_glyphs: usize,
 ) -> Result<LineEdit, EditError> {
+    let normalized;
+    let lines = if block.invisible {
+        normalized = uniform_ocr_lines(block, lines)?;
+        normalized.as_slice()
+    } else {
+        lines
+    };
     let first = block.lines.first().and_then(|i| lines.get(*i)).ok_or_else(|| EditError::Invalid("the paragraph has no source runs".into()))?;
     let draft = match text {
         Some(t) if t != block.text => t,
@@ -444,7 +489,15 @@ pub(super) fn rewrite_styled_block(
     let mut styled_spans = Vec::new();
     let mut underlines = HashMap::new();
     let mut overrides = HashMap::new();
-    for (span, source) in block.edited_spans(draft) {
+    let spans = if block.invisible {
+        // group_layout keeps scanned visual rows in separate blocks. All rows newly wrapped
+        // from this one source row share its median size. Coalescing the inter-word spaces
+        // also prevents a word's box from shifting its leading space to the left.
+        vec![(0..draft.len(), block.lines.first().copied().unwrap_or(0))]
+    } else {
+        block.edited_spans(draft)
+    };
+    for (span, source) in spans {
         let mut edges = vec![span.start, span.end];
         for r in &ranges {
             for edge in [r.range.start, r.range.end] {
@@ -546,7 +599,7 @@ pub(super) fn rewrite_styled_block(
     }
     // A visual row grows even when it contains several source/font runs. Multi-row
     // paragraphs retain their container width; an explicit width always wins.
-    let natural = if block.invisible || block.rows.len() == 1 {
+    let natural = if !block.invisible && block.rows.len() == 1 {
         (p.crop(doc)[2] - 36.0 - (block.rect[0] + dx)).max(block.rect[2] - block.rect[0])
     } else {
         block.rect[2] - block.rect[0]
@@ -731,7 +784,8 @@ pub(super) fn rewrite_styled_block(
                 source.origin.state.word_spacing,
             ) * source.origin.state.scale
                 * across(source);
-            let changed_face = style.resource.is_some() || overrides.get(&index).is_some_and(|r| r.family.is_some() || r.resource.is_some());
+            let changed_face =
+                block.invisible || style.resource.is_some() || overrides.get(&index).is_some_and(|r| r.family.is_some() || r.resource.is_some());
             let factor = if nominal > 0.0 && !changed_face { ((source.rect[2] - source.rect[0]) / nominal).clamp(0.5, 2.0) } else { 1.0 };
             calibration.insert(index, factor);
         }
@@ -843,7 +897,7 @@ pub(super) fn rewrite_styled_block(
     // A row the edit doesn't reach keeps its source operators, so its kerning, TJ word gaps and
     // glyph widths stay exactly as they were instead of being rebuilt from the text state.
     let plain = BlockStyle { ranges: Vec::new(), ..style.clone() } == BlockStyle::default();
-    let mut kept = if plain {
+    let mut kept = if plain && !block.invisible {
         untouched_rows(block, draft, &row_ranges).into_iter().zip(&rows).map(|(same, row)| same && row.iter().all(|c| c.1 < source_count)).collect()
     } else {
         vec![false; rows.len()]
@@ -918,7 +972,7 @@ pub(super) fn rewrite_styled_block(
     let (tx, ty) = back.apply(dx, dy);
     block_ops.push(Op::new("cm", vec![n(1.0), n(0.0), n(0.0), n(1.0), n(tx), n(ty)]));
     let crop = p.crop(doc);
-    let centered = is_centred(block, lines, (crop[0] + crop[2]) / 2.0, first.size);
+    let centered = !block.invisible && is_centred(block, lines, (crop[0] + crop[2]) / 2.0, first.size);
     let source_leading = block
         .rows
         .windows(2)

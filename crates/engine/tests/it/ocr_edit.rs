@@ -114,24 +114,29 @@ fn ocr_words_group_into_phrases_that_edit_in_place() {
     assert!((blocks[1].rect[0] - john[0]).abs() < 1.0, "the new word starts where the old one did: {:?} vs {john:?}", blocks[1].rect);
 }
 
-/// Several words of one OCR phrase rewrite as one line, without wrapping onto the line below.
+/// OCR edits rewrap at the recognised phrase width with ordinary, uniform metrics.
 #[test]
-fn a_longer_ocr_phrase_grows_rightwards() {
+fn a_longer_ocr_phrase_rewraps_with_uniform_rows() {
     let (mut s, id) = scanned_with(vec![
         scanned_word("Project", 20.0, 55.0, 70.0, 11.0),
         scanned_word("Lead", 59.0, 80.0, 70.0, 11.0),
         scanned_word("Testing", 20.0, 56.0, 56.0, 11.0),
     ]);
-    s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "Project Coordinator Lead".into(), style: Default::default() }).unwrap();
-    let blocks = s.get(id).unwrap().text_blocks(0);
-    assert_eq!(blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), ["Project Coordinator Lead", "Testing"]);
-    assert_eq!(blocks[0].rows.len(), 1, "one line");
+    let untouched = s.get(id).unwrap().text_lines(0).into_iter().find(|line| line.text == "Testing").unwrap();
+    s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "Project more Lead".into(), style: Default::default() }).unwrap();
+    let lines = s.get(id).unwrap().text_lines(0);
+    let rows: Vec<_> = lines.iter().filter(|line| line.text != "Testing").collect();
+    assert!(rows.len() >= 2);
+    assert_eq!(rows.iter().map(|line| line.text.trim()).collect::<Vec<_>>().join(" "), "Project more Lead");
+    assert!(rows.iter().all(|line| (line.size - 11.0).abs() < 0.001 && (line.rect[0] - 20.0).abs() < 0.001 && line.rect[2] <= 80.5));
+    let after = lines.iter().find(|line| line.text == "Testing").unwrap();
+    assert_eq!((after.rect, after.size, after.baseline()), (untouched.rect, untouched.size, untouched.baseline()));
 }
 
-/// OCR words differ in size and are stretched to fit the scan: a rewritten phrase keeps each
-/// word's width, so the words don't run into one another.
+/// Recognition boxes do not describe the printed face: the rewrite uses the median source
+/// height and a single ordinary row, rather than retaining each word's stretch.
 #[test]
-fn a_rewritten_ocr_phrase_keeps_its_word_widths() {
+fn a_rewritten_ocr_phrase_uses_uniform_metrics() {
     let (mut s, id) = scanned_with(vec![
         scanned_word("John", 20.0, 45.0, 70.0, 10.5),
         scanned_word("Smith", 49.0, 78.0, 70.0, 11.0),
@@ -139,11 +144,9 @@ fn a_rewritten_ocr_phrase_keeps_its_word_widths() {
     ]);
     s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "John Smith Exam".into(), style: Default::default() }).unwrap();
     let lines = s.get(id).unwrap().text_lines(0);
-    assert_eq!(lines.iter().map(|l| l.text.trim()).collect::<Vec<_>>(), ["John", "Smith", "Exam"]);
-    assert!((lines[0].rect[2] - 45.0).abs() < 0.5, "John keeps its width: {:?}", lines[0].rect);
-    for pair in lines.windows(2) {
-        assert!(pair[1].rect[0] >= pair[0].rect[2] - 0.5, "{:?} runs into {:?}", pair[1].text, pair[0].text);
-    }
+    assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["John Smith Exam"]);
+    assert!((lines[0].size - 11.0).abs() < 0.001);
+    assert!((lines[0].baseline()[0] - 20.0).abs() < 0.001);
 }
 
 /// Visible text set with a horizontally stretched text matrix (3 × 1), as some generators write.

@@ -3012,7 +3012,8 @@ fn rewrite_block_from(
     if upright
         && !hebrew
         && !visual_indic
-        && (!style.ranges.is_empty()
+        && (b.invisible
+            || !style.ranges.is_empty()
             || style.resource.is_some()
             || (text.is_some_and(|draft| {
                 // A row break, `\n` or a carriage return, takes the path that keeps untouched rows.

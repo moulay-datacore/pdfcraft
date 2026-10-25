@@ -2819,6 +2819,65 @@ fn image_page_with(content: &str) -> Document {
     Document::open(Arc::new(out)).unwrap()
 }
 
+/// Generated pixels and recogniser-like word boxes; no scanned or third-party document.
+fn uneven_ocr_page() -> Document {
+    image_page_with(
+        "q 160 0 0 20 70 566 cm /Im0 Do Q \
+         /PCMark /OCR BDC BT /F1 1 Tf 3 Tr \
+         11.03 0 0 13.29 72 570 Tm (Lorem) Tj \
+         11.34 0 0 11.25 108 570.4 Tm (ipsum) Tj \
+         10.69 0 0 12.03 140 569.6 Tm (dolor) Tj \
+         12 0 0 10.78 170 569.5 Tm (SITAMET) Tj ET EMC \
+         BT 0 Tr /F1 12 Tf 1 0 0 1 72 450 Tm (Keep this paragraph) Tj ET",
+    )
+}
+
+#[test]
+fn ocr_rewrite_uses_one_uniform_row_and_keeps_the_scan_cover() {
+    for family in [None, Some((added::Family::Times, false, false))] {
+        let mut doc = uneven_ocr_page();
+        let blocks = text::text_blocks(&doc, 0).unwrap();
+        assert!(blocks[0].invisible);
+        assert_eq!(blocks[0].editor_text, "Lorem ipsum dolor SITAMET");
+        let original = text::text_lines(&doc, 0).unwrap();
+        let neighbour = original.last().unwrap().clone();
+        let style = text::BlockStyle { family, cover: Some([1.0; 3]), ..Default::default() };
+        text::rewrite_block(&mut doc, 0, 0, Some("Other ipsum dolor SITAMET"), &style).unwrap();
+        let reopened = reopen(&doc);
+        let lines = text::text_lines(&reopened, 0).unwrap();
+        assert_eq!(lines.len(), 2, "one text run for the rewritten row, plus its untouched neighbour");
+        assert_eq!(lines[0].text, "Other ipsum dolor SITAMET");
+        assert!((lines[0].size - 11.64).abs() < 0.001, "the median vertical source size");
+        assert_eq!(lines[0].baseline()[0], 72.0);
+        assert!((lines[0].baseline()[1] - 569.8).abs() < 0.001);
+        assert_eq!(
+            (lines[1].text.as_str(), lines[1].rect, lines[1].size, lines[1].baseline()),
+            (neighbour.text.as_str(), neighbour.rect, neighbour.size, neighbour.baseline())
+        );
+        assert_eq!(
+            (lines[1].font.as_str(), lines[1].base_font.as_str(), lines[1].color),
+            (neighbour.font.as_str(), neighbour.base_font.as_str(), neighbour.color)
+        );
+        let ops = pdfcraft_content::parse(&page_content_bytes(&reopened, 0)).ops;
+        let mut matrix = [0.0; 6];
+        let mut shown = Vec::new();
+        for op in &ops {
+            if op.is("Tm") {
+                matrix = op.nums::<6>().unwrap();
+            }
+            if op.is("Tj") || op.is("TJ") {
+                shown.push(matrix);
+            }
+        }
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0][0], shown[0][3]);
+        assert_eq!((shown[0][1], shown[0][2]), (0.0, 0.0));
+        // One padded cover path per source word, over the original pixels.
+        assert_eq!(ops.iter().filter(|op| op.is("h")).count(), 4);
+        assert_eq!(images::page_images(&reopened, 0).unwrap().len(), 1);
+    }
+}
+
 /// A path segment operator before any `m` (or `re`) has no subpath to extend: the image scan used
 /// to call `BezPath`'s `line_to`/`curve_to`/`close_path` on an empty path, which panics by contract,
 /// taking `object_list`, `page_images` and the Office export's image walk down with it (#3581).
