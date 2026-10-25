@@ -175,6 +175,17 @@ impl MoveBackground {
             }
             self.tag = Some(tag);
         }
+        if self.receive(ctx, tag) && self.pending() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
+    /// Takes in the rasters rendered at `tag`. `false` when either failed: the preview is then
+    /// dropped whole, including rasters in from an earlier scale.
+    fn receive(&mut self, ctx: &egui::Context, tag: u64) -> bool {
+        let (Some(renderer), Some(item_renderer)) = (self.renderer.as_ref(), self.item_renderer.as_ref()) else {
+            return false;
+        };
         let mut failed = false;
         for (r, slot, name) in
             [(renderer, &mut self.texture, "added-content-move-background"), (item_renderer, &mut self.item, "added-content-move-item")]
@@ -194,11 +205,10 @@ impl MoveBackground {
             // Without both rasters the item stays put while dragged, as before.
             self.renderer = None;
             self.item_renderer = None;
-            return;
+            self.texture = None;
+            self.item = None;
         }
-        if self.pending() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        }
+        !failed
     }
 
     /// The move was applied: keep the preview, now at the new generation, until the page is
@@ -1033,6 +1043,35 @@ mod tests {
         assert!(i.flip_h && !i.flip_v, "Flip horizontal mirrors left and right");
         let i = flipped("Flip vertical");
         assert!(i.flip_v && !i.flip_h, "Flip vertical mirrors top and bottom");
+    }
+
+    /// #4464: both rasters were in at one scale and a render at a new scale failed. The rasters
+    /// from the old scale must go too, or the item keeps following the pointer although the
+    /// preview gave up.
+    #[test]
+    fn failed_rerender_drops_the_rasters_from_the_earlier_scale() {
+        let ctx = egui::Context::default();
+        let texture = |name| Some(ctx.load_texture(name, egui::ColorImage::filled([1, 1], Color32::WHITE), egui::TextureOptions::LINEAR));
+        // Bytes no parser accepts: every render answers with an error.
+        let pool = || {
+            let pool = pdfcraft_render::RenderPool::new_inline(std::sync::Arc::new(b"not a pdf".to_vec()), Default::default());
+            pool.set_queue(vec![pdfcraft_render::RenderRequest { page: 0, scale: 2.0, tag: 2000, ..Default::default() }]);
+            pool
+        };
+        let mut mb = MoveBackground {
+            key: Some((0, 0, 0)),
+            renderer: Some(pool()),
+            texture: texture("background"),
+            item_renderer: Some(pool()),
+            item: texture("item"),
+            tag: Some(2000),
+            from: Some([0.0, 0.0, 10.0, 10.0]),
+            ..Default::default()
+        };
+        assert!(mb.ready(), "both rasters from the earlier scale are in");
+        assert!(!mb.receive(&ctx, 2000), "the new scale's renders fail");
+        assert!(mb.texture.is_none() && mb.item.is_none(), "no raster is left to draw the moving item from");
+        assert!(!mb.ready() && !mb.pending());
     }
 
     /// #4245: the page counts the spacing after a line's last character too, so a line that fits
