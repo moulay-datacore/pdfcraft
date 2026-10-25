@@ -7526,6 +7526,8 @@ fn spaces_and_indents_in_a_subset_without_a_space_glyph_round_trip_across_edits(
             underline: None,
             char_spacing: None,
             scale: None,
+            synthetic_bold: None,
+            synthetic_italic: None,
         }],
         ..Default::default()
     };
