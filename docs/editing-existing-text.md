@@ -36,16 +36,17 @@ with `installed: true`. With this grant, a font without an open-licence declarat
 accepted when its OS/2 `fsType` permits editable embedding, and the user answers for its
 licence when sharing the PDF (#2077). Interface fallback fonts are never exported.
 
-Based on #1267 by @komo1iddin (Refs #2077), discovery caches a bounded snapshot of eligible
-standalone font bytes off the desktop UI thread. Exact PostScript matches are preferred, then
+Based on #1267 by @komo1iddin (Refs #2077), discovery indexes eligible standalone faces off the desktop UI thread, retaining paths and
+metadata only. It reads the sfnt directory and at most 1 MiB of name/OS/2 tables per file,
+without a cumulative font-size budget. A matching program is read in full only when needed;
+changed files and programs failing the full grant validation are skipped. Exact PostScript matches are preferred, then
 matching family, weight and italic names; another family never completes a subset. Existing
 glyphs retain the source resource; only missing glyphs use the registered full face. Completion
 and text are one undo step. The UI reports the face “from this computer”; automation returns
 `installed_completions` for the requested paragraph (including layout previews). Automation scans
 only its permitted read root when confined. Collections (`.ttc`), variable instances and ambiguous
 or unrecognized style names remain unsupported. Turned text, Hebrew and visual-order Indic
-rewrites retain their existing single-face behavior and do not register or report installed completion. Discovery retains the 4096-entry, four-level,
-64 MiB read budget and 16 MiB file cap. macOS includes `/System/Library/Fonts` and `Supplemental`.
+rewrites retain their existing single-face behavior and do not register or report installed completion. Discovery retains the 4096-entry cap, four-level depth cap and 16 MiB file cap. macOS includes `/System/Library/Fonts` and `Supplemental`.
 
 
 The full selected program, glyph mappings, widths and Unicode text are embedded in the PDF.

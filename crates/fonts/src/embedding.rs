@@ -66,8 +66,30 @@ pub fn covers(bytes: &[u8], text: &str) -> bool {
 
 /// Names come from the program, never a caller's guessed family.
 pub fn names(bytes: &[u8]) -> Result<(String, String), String> {
-    use skrifa::string::StringId;
     validate(bytes)?;
+    let metadata = document_metadata(bytes, None)?;
+    Ok((metadata.family, metadata.postscript))
+}
+
+/// Small name/permission snapshot. Discovery may supply just the sfnt name and OS/2 tables;
+/// this does not validate outlines or Unicode maps. Always validate the full program on use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentFontMetadata {
+    pub family: String,
+    pub postscript: String,
+    pub full_name: String,
+    pub weight: u16,
+    pub italic: bool,
+    pub fs_type: Option<u16>,
+}
+
+/// Inspect metadata and, when requested, apply exactly the document-input grant policy.
+/// No font bytes are retained by the returned value.
+pub fn document_metadata(bytes: &[u8], grant: Option<FontGrant>) -> Result<DocumentFontMetadata, String> {
+    use skrifa::string::StringId;
+    if bytes.len() > 16 << 20 {
+        return Err("the selected font exceeds 16 MiB".into());
+    }
     let f = FontRef::new(bytes).map_err(|e| e.to_string())?;
     let name = |id| {
         f.localized_strings(id)
@@ -78,7 +100,44 @@ pub fn names(bytes: &[u8]) -> Result<(String, String), String> {
     };
     let family = name(StringId::FAMILY_NAME).ok_or("the font has no family name")?;
     let postscript = name(StringId::POSTSCRIPT_NAME).unwrap_or_else(|| family.replace(' ', ""));
-    Ok((family, postscript))
+    let full_name = name(StringId::FULL_NAME).unwrap_or_else(|| family.clone());
+    let os2 = f.os2().ok();
+    let metadata = DocumentFontMetadata {
+        family,
+        postscript,
+        full_name,
+        weight: os2.as_ref().map_or(400, |t| t.us_weight_class()),
+        italic: os2.as_ref().is_some_and(|t| t.fs_selection().bits() & 1 != 0),
+        fs_type: os2.as_ref().map(|t| t.fs_type()),
+    };
+    let Some(grant) = grant else { return Ok(metadata) };
+    let key = face_key(&metadata.family);
+    if ["sourcehan", "sourceserif", "sourcesans", "notosanscjk", "notoserifcjk"].iter().any(|n| key.starts_with(n)) {
+        return Err("this font family is excluded by the project's asset policy".into());
+    }
+    if [StringId::COPYRIGHT_NOTICE, StringId::MANUFACTURER]
+        .into_iter()
+        .flat_map(|id| f.localized_strings(id))
+        .any(|s| s.to_string().to_ascii_lowercase().contains("adobe"))
+    {
+        return Err("Adobe-authored font assets are excluded by the project's asset policy".into());
+    }
+    if metadata.fs_type.is_some_and(|flags| flags & (0x0002 | 0x0004 | 0x0200) != 0) {
+        return Err("this font's embedding permissions prohibit editable outline embedding".into());
+    }
+    if grant == FontGrant::InstalledEmbeddable {
+        if metadata.fs_type.is_none() {
+            return Err("this font declares no embedding permission (no readable OS/2 table)".into());
+        }
+    } else if !f.localized_strings(StringId::LICENSE_DESCRIPTION).any(|s| {
+        let license = s.to_string();
+        ["SIL OPEN FONT", "SIL Open Font", "Apache License", "Ubuntu Font Licence", "Bitstream Vera", "MIT License"]
+            .iter()
+            .any(|l| license.contains(l))
+    }) {
+        return Err("select an openly licensed font whose name table declares its licence (OFL, Apache, Ubuntu, Bitstream Vera or MIT)".into());
+    }
+    Ok(metadata)
 }
 
 /// What lets a font the user selected into an exported PDF.
@@ -98,31 +157,8 @@ pub enum FontGrant {
 /// an open licence itself; excluded families and Adobe-authored fonts are refused under either
 /// grant, and an interface fallback font is never exported.
 pub fn validate_document_input(bytes: &[u8], grant: FontGrant) -> Result<(), String> {
-    use skrifa::string::StringId;
-    let (family, _) = names(bytes)?;
-    let key = face_key(&family);
-    if ["sourcehan", "sourceserif", "sourcesans", "notosanscjk", "notoserifcjk"].iter().any(|n| key.starts_with(n)) {
-        return Err("this font family is excluded by the project's asset policy".into());
-    }
-    let f = FontRef::new(bytes).map_err(|e| e.to_string())?;
-    let attribution: String =
-        [StringId::COPYRIGHT_NOTICE, StringId::MANUFACTURER].into_iter().flat_map(|id| f.localized_strings(id)).map(|s| s.to_string()).collect();
-    if attribution.to_ascii_lowercase().contains("adobe") {
-        return Err("Adobe-authored font assets are excluded by the project's asset policy".into());
-    }
-    if grant == FontGrant::InstalledEmbeddable {
-        // The grant rests on the vendor's fsType: a font without a readable OS/2 table states no
-        // embedding permission at all.
-        return f.os2().map(|_| ()).map_err(|_| "this font declares no embedding permission (no readable OS/2 table)".into());
-    }
-    let license: String = f.localized_strings(StringId::LICENSE_DESCRIPTION).map(|s| s.to_string()).collect();
-    if !["SIL OPEN FONT", "SIL Open Font", "Apache License", "Ubuntu Font Licence", "Bitstream Vera", "MIT License"]
-        .iter()
-        .any(|l| license.contains(l))
-    {
-        return Err("select an openly licensed font whose name table declares its licence (OFL, Apache, Ubuntu, Bitstream Vera or MIT)".into());
-    }
-    Ok(())
+    validate(bytes)?;
+    document_metadata(bytes, Some(grant)).map(|_| ())
 }
 
 /// Validate before allocating any PDF objects, so an invalid font cannot partly mutate a doc.

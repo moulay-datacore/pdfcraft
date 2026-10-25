@@ -95,6 +95,8 @@ paragraph’s glyphs removed, preserving text positioning, images and colours. I
 working document’s render configuration and never enters the undo history.
 
 Installed subset completion (Refs #2077, based on #1267 by @komo1iddin) uses an immutable,
-bounded `text_fonts::Catalogue` snapshot. Frontends opt in explicitly; paragraph automation
+metadata-only `text_fonts::Catalogue` snapshot (paths, names, style and permission). Discovery
+reads only capped metadata tables, without a cumulative font-size budget. Matched programs
+are loaded lazily and validated in full; changed or invalid files are skipped. Frontends opt in explicitly; paragraph automation
 uses `installed: true` on each call and reports `installed_completions`. Font bytes are
 registered inside the text transaction; L4 performs no filesystem reads. Collections remain unsupported.

@@ -107,7 +107,6 @@ fn matching_installed_subset_completion_is_atomic_and_portable() {
     std::fs::write(dir.join("face.otf"), support::font_fixture::named_font("Rect Font", "RectFont", 0, true)).unwrap();
     let fonts = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
     assert_eq!(fonts.files().count(), 1);
-    std::fs::remove_dir_all(&dir).unwrap();
     let source = support::source_subset::source_subset();
     let mut s = Session::new();
     let id = s.open("source.pdf", None, source.clone(), None).unwrap();
@@ -123,6 +122,7 @@ fn matching_installed_subset_completion_is_atomic_and_portable() {
     assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<String>(), "AB");
     assert!(lines.iter().all(|l| pdfcraft_fonts::embedding::same_face_name(&l.base_font, "RectFont-Regular")));
     let saved = s.save_bytes(id).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
     let cos = Document::open(saved.clone()).unwrap();
     let page = pdfcraft_model::pages(&cos).remove(0);
     let resources = cos.dict(page.dict.get(b"Resources").unwrap()).unwrap();
@@ -198,4 +198,74 @@ fn installed_subset_completion_requires_opt_in_same_family_and_editable_embeddin
         assert!(s.get(id).unwrap().installed_completions.is_empty(), "{label}");
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+// Index size must depend on metadata, not the cumulative size of installed programs.
+#[test]
+fn installed_metadata_index_has_no_total_program_size_budget() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-metadata-budget-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for index in 0..9 {
+        let path = dir.join(format!("{index}.otf"));
+        std::fs::write(&path, support::font_fixture::named_font("Rect Font", &format!("RectFont-{index}"), 0, true)).unwrap();
+        // Sparse padding: over 64 MiB in total, with only a few KiB of metadata.
+        std::fs::OpenOptions::new().write(true).open(path).unwrap().set_len(9 << 20).unwrap();
+    }
+    let catalogue = Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable);
+    assert_eq!(catalogue.files().count(), 9);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn installed_metadata_reads_are_capped_and_full_validation_is_deferred() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-metadata-validation-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut font = support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true);
+    let count = u16::from_be_bytes(font[4..6].try_into().unwrap()) as usize;
+    let name_record = (0..count).map(|i| 12 + i * 16).find(|i| &font[*i..*i + 4] == b"name").unwrap();
+    let offset = u32::from_be_bytes(font[name_record + 8..name_record + 12].try_into().unwrap()) as usize;
+    let original_len = font.len();
+    font.resize(original_len + (1 << 20), 0);
+    let length = (font.len() - offset) as u32;
+    font[name_record + 12..name_record + 16].copy_from_slice(&length.to_be_bytes());
+    std::fs::write(dir.join("large-name.otf"), &font).unwrap();
+    let catalogue = Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable);
+    assert_eq!(catalogue.files().count(), 0, "metadata table read cap");
+    std::fs::remove_file(dir.join("large-name.otf")).unwrap();
+    let mut font = support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true);
+    let cmap_record = (0..count).map(|i| 12 + i * 16).find(|i| &font[*i..*i + 4] == b"cmap").unwrap();
+    let offset = u32::from_be_bytes(font[cmap_record + 8..cmap_record + 12].try_into().unwrap()) as usize;
+    font[offset..offset + 4].fill(0);
+    std::fs::write(dir.join("bad-cmap.otf"), font).unwrap();
+    let catalogue = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
+    assert_eq!(catalogue.files().count(), 1, "index reads metadata only");
+    let mut session = Session::new();
+    let id = session.open("source.pdf", None, support::source_subset::source_subset(), None).unwrap();
+    session.set_text_font_catalogue(catalogue);
+    assert!(session.get(id).unwrap().matching_font_completions(0, 0, "AB", &BlockStyle::default()).unwrap().is_empty(), "full validation on use");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn installed_metadata_catalogue_skips_changed_and_removed_programs() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-metadata-changed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("font.otf");
+    std::fs::write(&path, support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true)).unwrap();
+    let catalogue = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
+    assert_eq!(catalogue.files().count(), 1);
+    let mut session = Session::new();
+    let id = session.open("source.pdf", None, support::source_subset::source_subset(), None).unwrap();
+    session.set_text_font_catalogue(catalogue);
+    std::fs::write(&path, support::font_fixture::named_font("Rect Font", "RectFont-Regular", 2, true)).unwrap();
+    assert!(session.get(id).unwrap().matching_font_completions(0, 0, "AB", &BlockStyle::default()).unwrap().is_empty());
+    std::fs::remove_file(path).unwrap();
+    assert!(session.get(id).unwrap().matching_font_completions(0, 0, "AB", &BlockStyle::default()).unwrap().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
 }
