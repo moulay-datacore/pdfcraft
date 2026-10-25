@@ -1284,6 +1284,22 @@
 	Also recognize pages that already have text	Reconnaître aussi les pages qui contiennent déjà du texte
 	Pictures on those pages are recognized too; words already in the page's text are not added again	Les images de ces pages sont aussi reconnues ; les mots déjà présents dans le texte de la page ne sont pas ajoutés une seconde fois
 	Text recognition isn't installed: its model files are missing. Reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them.	La reconnaissance de texte n'est pas installée : ses fichiers de modèles sont absents. Réinstallez PdfCraft, ou définissez PDFCRAFT_MODELS sur le dossier qui les contient.
+	French	Français
+	German	Allemand
+	Spanish	Espagnol
+	Italian	Italien
+	Portuguese	Portugais
+	Dutch	Néerlandais
+	{language} — read as English	{language} — lu comme de l'anglais
+	{language} — not installed	{language} — non installé
+	This language's model isn't available: its text will be read as English, without accents.	Le modèle de cette langue n'est pas disponible : son texte sera lu comme de l'anglais, sans les accents.
+	This language's model isn't installed.	Le modèle de cette langue n'est pas installé.
+	Replace existing OCR text	Remplacer le texte OCR existant
+	Pages with text PdfCraft recognized before are read again, and the new text takes its place; other text on them stays	Les pages dont PdfCraft a déjà reconnu le texte sont relues, et le nouveau texte prend sa place ; le reste du texte de ces pages est conservé
+	; read as English: the {language} model isn't installed	; lu comme de l'anglais : le modèle « {language} » n'est pas installé
+	; read as English: the {language} model couldn't be loaded ({e})	; lu comme de l'anglais : le modèle « {language} » n'a pas pu être chargé ({e})
+	; replaced the earlier recognized text on 1 page	; texte reconnu auparavant remplacé sur 1 page
+	; replaced the earlier recognized text on {n} pages	; texte reconnu auparavant remplacé sur {n} pages
 	Settings	Réglages
 	Optional	Facultatif
 	Planned · {m}	Prévu · {m}

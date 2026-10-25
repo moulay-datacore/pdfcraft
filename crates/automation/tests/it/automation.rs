@@ -6334,6 +6334,74 @@ fn ocr_tools_make_a_scan_searchable() {
     assert!(matches!(a.call("ocr_recognize", &json!({ "doc": scan, "language": "xx" })), Err(ToolError::InvalidArgs(_))));
 }
 
+/// Every language text recognition reads is offered, with its state, and checked the same way
+/// by every OCR tool: the schemas list the same codes, a language it doesn't read is refused
+/// naming the ones it does, and a tag such as fr-CA is the language (no models needed).
+#[test]
+fn ocr_tools_offer_and_check_every_language() {
+    let codes: Vec<&str> = pdfcraft_engine::ocr::LANGUAGES.iter().map(|l| l.code).collect();
+    assert_eq!(codes, ["en", "fr", "de", "es", "it", "pt", "nl"]);
+    for name in ["ocr_recognize", "ocr_recognize_files", "doc_batch"] {
+        let t = tools().into_iter().find(|t| t.name == name).unwrap();
+        let props = &t.input_schema["properties"];
+        assert_eq!(props["language"]["enum"], json!(codes), "{name}");
+        assert_eq!(props["replace_ocr"]["type"], "boolean", "{name}");
+    }
+    let dir = workdir("ocr-languages");
+    let mut a = auto(&dir);
+    let status = ok(&mut a, "ocr_status", json!({}));
+    let langs = status["languages"].as_array().unwrap();
+    assert_eq!(langs.iter().map(|l| l["code"].as_str().unwrap()).collect::<Vec<_>>(), codes);
+    for l in langs {
+        assert!(["ready", "falls_back_to_english", "missing"].contains(&l["state"].as_str().unwrap()), "{l}");
+        assert_eq!(l["reader"], if l["code"] == "en" { "ocrs" } else { "pp-ocr" }, "{l}");
+    }
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    for bad in [json!({ "doc": doc, "language": "xx" }), json!({ "doc": doc, "language": "pl" }), json!({ "doc": doc, "replace_ocr": "yes" })] {
+        let e = err(&mut a, "ocr_recognize", bad.clone());
+        assert!(matches!(&e, ToolError::InvalidArgs(_)), "{bad}: {e}");
+        if bad.get("language").is_some() {
+            assert!(e.to_string().contains("en, fr, de, es, it, pt, nl"), "{e}");
+        }
+    }
+    // A tag names its language: accepted (the page has text, so it is skipped either way).
+    let r = a.call("ocr_recognize", &json!({ "doc": doc, "pages": [1], "language": "FR-ca" }));
+    assert!(!matches!(r, Err(ToolError::InvalidArgs(_))), "{r:?}");
+    let e = a.call("doc_batch", &json!({ "paths": ["a.pdf"], "steps": ["optimize"], "out_dir": "out", "replace_ocr": true })).unwrap_err();
+    assert!(e.to_string().contains("ocr step"), "{e}");
+}
+
+/// French is read with its accents and the result says which language it read; reading again
+/// with replace_ocr replaces the earlier OCR text instead of skipping the page (needs the
+/// accented-Latin model; skipped without it).
+#[test]
+fn ocr_recognize_reads_french_and_replaces_its_own_text() {
+    let dir = workdir("ocr-french");
+    let mut a = auto(&dir);
+    let status = ok(&mut a, "ocr_status", json!({}));
+    if status["languages"][1]["state"] != "ready" {
+        eprintln!("skipped: the French recognition model is not installed");
+        return;
+    }
+    let text = ok(&mut a, "doc_create", json!({ "from": "text", "text": "Le médecin à l'hôpital, garçon" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_images", json!({ "doc": text, "folder": "scan", "dpi": 200, "pages": [1] }));
+    let png = std::fs::read_dir(dir.join("scan")).unwrap().next().unwrap().unwrap().path();
+    let scan = ok(&mut a, "doc_create", json!({ "from": "images", "paths": [png.to_string_lossy()] }))["doc"].as_u64().unwrap();
+    let r = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "fr" }));
+    assert_eq!((&r["language"], &r["fell_back_from"], &r["replaced_pages"]), (&json!("fr"), &json!(null), &json!(0)), "{r}");
+    let read = r["pages"][0]["text"].as_str().unwrap();
+    assert!(read.contains("médecin") && read.contains("garçon") && !read.contains('?'), "{r}");
+
+    let skipped = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "fr" }));
+    assert!(skipped["pages"][0]["skipped"].is_string(), "{skipped}");
+    let again = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "fr", "replace_ocr": true }));
+    assert_eq!(again["replaced_pages"], 1, "{again}");
+    assert!(again["pages"][0]["replaced_words"].as_u64().unwrap() >= 3, "{again}");
+    let found = ok(&mut a, "text_find", json!({ "doc": scan, "query": "médecin" }))["count"].as_u64().unwrap();
+    assert_eq!(found, 1, "replaced, not added a second time");
+    assert_eq!(ok(&mut a, "edit_undo", json!({ "doc": scan }))["undone"], "Recognize text");
+}
+
 /// #1028: `skip_text_pages: false` reads a picture on a page that has its own text, and the
 /// page's own words are left out (counted) instead of being added a second time.
 #[test]

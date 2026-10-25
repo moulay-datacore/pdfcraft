@@ -847,7 +847,7 @@ impl crate::PdfCraftApp {
         self.ocr_draft.pages = crate::ocr_ui::OcrPages::Range;
         self.ocr_draft.from = page + 1;
         self.ocr_draft.to = page + 1;
-        self.dialog = Some(crate::Dialog::RecognizeText);
+        self.open_recognize_text();
     }
 
     /// Click an image field: pick a picture for it.

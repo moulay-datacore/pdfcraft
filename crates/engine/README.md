@@ -79,7 +79,8 @@ family (`sign`, `sign_with_timestamp`, `timestamp_document`, `embed_ltv`).
 | `actions` | PDF action dispatch (go-to, URI, named, set-layer-state, JavaScript) |
 | `links` | Link creation, properties, and finding URLs in page text |
 | `js` | The bridge to `pdfcraft-js`. `forms` never depends on `js` directly; the engine injects it, so a build without JavaScript is possible |
-| `xfa`, `ocr`, `compare`, `export` | Façades over the L3/L4 crates of the same names |
+| `xfa`, `compare`, `export` | Façades over the L3/L4 crates of the same names |
+| `ocr` | Recognize Text over `pdfcraft-ocr`: the language a run reads (the run's, else the user's last pick, else the document's `/Lang`, else the interface's, else English), recognisers loaded once per set of model files and shared, the fallback to English recorded in every result (`OcrOutcome::fallback`), and reading a page again in place of PdfCraft's own earlier OCR text (`OcrSettings::replace_ocr`, `Edit::ReplaceOcrText`) in one undo step |
 
 ## Not done here
 

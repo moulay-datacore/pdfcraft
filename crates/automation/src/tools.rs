@@ -30,6 +30,24 @@ fn pages(what: &str) -> Value {
     json!({ "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": format!("1-based page numbers {what}.") })
 }
 
+/// The OCR language argument: the codes text recognition reads ([`pdfcraft_engine::ocr::LANGUAGES`]).
+fn ocr_language() -> Value {
+    let codes: Vec<&str> = pdfcraft_engine::ocr::LANGUAGES.iter().map(|l| l.code).collect();
+    json!({
+        "type": "string",
+        "enum": codes,
+        "description": "The language to read: en reads the Latin alphabet without accents; fr, de, es, it, pt and nl read their accents (é è à ç œ ä ö ü ß ñ « » ° …). Default: the document's own language (its /Lang) when text recognition reads it, else en. A language whose model isn't installed is read as en, and the result says so (fell_back_from)."
+    })
+}
+
+/// The OCR replace argument.
+fn replace_ocr() -> Value {
+    json!({
+        "type": "boolean",
+        "description": "Replace the OCR text PdfCraft added earlier (default false): it doesn't count as the page's text, so such a page is read again and the new text takes its place, in the same undoable step. A page where nothing is recognised, or that would be read as English instead of the language asked for, keeps it. Other text, an OCR layer edited since included, is kept."
+    })
+}
+
 fn path(what: &str) -> Value {
     json!({ "type": "array", "items": { "type": "integer", "minimum": 1 }, "description": format!("{what}: 1-based positions from the top level, e.g. [2, 1] = the first child of the second bookmark.") })
 }
@@ -121,7 +139,7 @@ pub fn tools() -> Vec<ToolDef> {
     let save_out = json!({ "type": "string", "description": "File to write. Omit to open the result as a new unsaved document instead." });
     let open = json!({ "type": "boolean", "description": "Also open the result as a new document (default: only when out is omitted)." });
     vec![
-        t("doc_batch", "Process files and folders", "Run convert, ocr and/or optimize over files and folders, one file at a time. recursive defaults to false. Preserve paths relative to each selected folder inside out_dir; duplicate inputs run once. Skip unsupported files, links and the output subtree. Existing outputs receive numbered names and are never replaced. Continue after per-file errors unless stop_on_error is true. Return completed/failed/skipped counts and per-file results. Discovery is bounded to 10000 entries and 64 folder levels. Convert must be first; each step can appear once. OCR uses installed models. Optimize uses Reduce File Size settings, optionally overriding target ppi (threshold 1.5 times ppi) and JPEG quality; a larger candidate keeps the original bytes. Sources and open documents are unchanged.")
+        t("doc_batch", "Process files and folders", "Run convert, ocr and/or optimize over files and folders, one file at a time. recursive defaults to false. Preserve paths relative to each selected folder inside out_dir; duplicate inputs run once. Skip unsupported files, links and the output subtree. Existing outputs receive numbered names and are never replaced. Continue after per-file errors unless stop_on_error is true. Return completed/failed/skipped counts and per-file results. Discovery is bounded to 10000 entries and 64 folder levels. Convert must be first; each step can appear once. OCR uses installed models and the ocr_recognize settings (dpi, language, skip_text_pages, replace_ocr); its step log reports the words, skipped and replaced pages, the language read and any fallback to English (fell_back_from, fallback_reason). Optimize uses Reduce File Size settings, optionally overriding target ppi (threshold 1.5 times ppi) and JPEG quality; a larger candidate keeps the original bytes. Sources and open documents are unchanged.")
             .with(schema(json!({
                 "paths": {"type":"array","items":{"type":"string"},"minItems":1,"maxItems":1000},
                 "out_dir": {"type":"string"},
@@ -130,7 +148,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "ppi": {"type":"number","minimum":9,"maximum":1600},
                 "quality": {"type":"integer","minimum":1,"maximum":100},
                 "dpi": {"type":"number","minimum":72,"maximum":600},
-                "language": {"type":"string"}, "skip_text_pages": {"type":"boolean"}
+                "language": ocr_language(), "skip_text_pages": {"type":"boolean"}, "replace_ocr": replace_ocr()
             }), &["paths","out_dir","steps"])),
         t("attachment_add", "Attach a file", "Attach the file at path to the document (document level, the Attachments panel; not a paper-clip comment on a page). name defaults to the file's name; the attachment's key, unique in the document, is returned. Undoable.")
             .cmd("edit.attach")
@@ -1213,31 +1231,33 @@ pub fn tools() -> Vec<ToolDef> {
             )),
         t("js_enabled", "JavaScript on or off", "Preferences ▸ JavaScript ▸ Enable Acrobat JavaScript: set it with `enabled`, or read it. With JavaScript off, field scripts other than Acrobat's AF calls don't run.")
             .with(schema(json!({ "enabled": { "type": "boolean" } }), &[])),
-        t("ocr_recognize", "Recognize text (OCR)", "Scan & OCR ▸ Recognize text: render pages, read the words in them and add them as invisible text over the page image, so scanned pages become searchable and selectable (a searchable image; the image is not changed). Pages that already have text are skipped unless skip_text_pages is false; then pictures on those pages are read too, and recognised words that the page's own text already has (an earlier OCR layer included) are left out and counted as already_on_page. Returns each page's recognised text (left out when the document's security doesn't allow copying), word count or why it was skipped. Needs the OCR models (ocr_status). Undoable as one step.")
+        t("ocr_recognize", "Recognize text (OCR)", "Scan & OCR ▸ Recognize text: render pages, read the words in them and add them as invisible text over the page image, so scanned pages become searchable and selectable (a searchable image; the image is not changed). Pages are read in one language (see language); English is read without accents, the others with theirs. A language whose model isn't installed is read as English instead, and the result says so: language is the language read, fell_back_from the one asked for and fallback_reason why (both null otherwise). Pages that already have text are skipped unless skip_text_pages is false; then pictures on those pages are read too, and recognised words that the page's own text already has (an earlier OCR layer included) are left out and counted as already_on_page. replace_ocr reads pages again whose earlier OCR text PdfCraft added and replaces that text (replaced_words per page; replaced_pages in all). Returns each page's recognised text (left out when the document's security doesn't allow copying), word count or why it was skipped. Needs the OCR models (ocr_status). Undoable as one step.")
             .cmd("ocr.recognize")
             .with(schema(
                 json!({
                     "doc": doc(),
                     "pages": pages("to recognise (default: all)"),
                     "dpi": { "type": "number", "minimum": 72, "maximum": 600, "description": "Resolution pages are read at (default 300; a scanned page is read at most at its own resolution)." },
-                    "language": { "type": "string", "enum": ["en"], "description": "Document language (default en)." },
+                    "language": ocr_language(),
                     "skip_text_pages": { "type": "boolean", "description": "Leave pages that already contain text alone (default true). false also reads pictures on such pages, without adding their text again." },
+                    "replace_ocr": replace_ocr(),
                 }),
                 &["doc"],
             )),
-        t("ocr_recognize_files", "Recognize text in multiple files", "Scan & OCR ▸ Recognize text ▸ In multiple files: read every page of each PDF in paths and write the searchable result into folder under the same name (pages that already have text are left alone unless skip_text_pages is false, as in ocr_recognize). Two inputs that would write the same output file are refused before anything is read or written. Returns, per file, the output path, word count and skipped pages, or the error.")
+        t("ocr_recognize_files", "Recognize text in multiple files", "Scan & OCR ▸ Recognize text ▸ In multiple files: read every page of each PDF in paths and write the searchable result into folder under the same name (pages that already have text are left alone unless skip_text_pages is false, as in ocr_recognize). Without language, each file is read in its own language (its /Lang), else English. Two inputs that would write the same output file are refused before anything is read or written. Returns, per file, the output path, word count, skipped and replaced pages, the language read and any fallback (fell_back_from, fallback_reason, as in ocr_recognize), or the error.")
             .cmd("ocr.recognize_batch")
             .with(schema(
                 json!({
                     "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
                     "folder": { "type": "string" },
                     "dpi": { "type": "number", "minimum": 72, "maximum": 600 },
-                    "language": { "type": "string", "enum": ["en"] },
+                    "language": ocr_language(),
                     "skip_text_pages": { "type": "boolean", "description": "Leave pages that already contain text alone (default true); see ocr_recognize." },
+                    "replace_ocr": replace_ocr(),
                 }),
                 &["paths", "folder"],
             )),
-        t("ocr_status", "OCR status", "Whether text recognition is available (its models are installed: release packages include them; a source build fetches them with `cargo xtask models`; PDFCRAFT_MODELS overrides), where it looks for them, and the languages it reads.")
+        t("ocr_status", "OCR status", "Whether text recognition is available (its models are installed: release packages include them; a source build fetches them with `cargo xtask models`; PDFCRAFT_MODELS overrides), where it looks for them, and the languages it reads, each with its reader and its state: ready, falls_back_to_english (its model is missing or can't be loaded, so it would be read as English, without accents) or missing.")
             .ro()
             .cmd("ocr.recognize")
             .with(schema(json!({}), &[])),

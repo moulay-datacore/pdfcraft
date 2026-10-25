@@ -575,21 +575,24 @@ impl Automation {
 }
 
 impl Automation {
-    /// Recognition settings from the arguments: `dpi` (clamped to 72–600), `language` (refused
-    /// unless the models read it) and `skip_text_pages`, each left at its default when absent.
+    /// Recognition settings from the arguments: `dpi` (clamped to 72–600), `language` (a code or
+    /// language tag text recognition reads, refused otherwise; absent reads each document in its
+    /// own language, its `/Lang`, else English: never the machine's, so a run gives the same
+    /// result anywhere), `skip_text_pages` and `replace_ocr`, each left at its default when
+    /// absent.
     pub(crate) fn ocr_settings(&self, a: &Args) -> Result<pdfcraft_engine::ocr::OcrSettings> {
         let mut settings = pdfcraft_engine::ocr::OcrSettings::default();
         if let Some(d) = a.opt_num("dpi")? {
             settings.dpi = d.clamp(72.0, 600.0) as f32;
         }
         if let Some(l) = a.opt_str("language")? {
-            if !pdfcraft_engine::ocr::LANGUAGES.iter().any(|x| x.code == l) {
-                return Err(ToolError::InvalidArgs(format!("unsupported language {l:?}")));
-            }
-            settings.language = l.into();
+            settings.language = Some(pdfcraft_engine::ocr::resolve_language(l).map_err(ToolError::InvalidArgs)?.code.into());
         }
         if let Some(s) = a.opt_bool("skip_text_pages")? {
             settings.skip_text_pages = s;
+        }
+        if let Some(r) = a.opt_bool("replace_ocr")? {
+            settings.replace_ocr = r;
         }
         Ok(settings)
     }
@@ -624,14 +627,17 @@ impl Automation {
             let name = input_file_name(p);
             let result =
                 self.resolve(p, false).map_err(|e| e.to_string()).and_then(|src| crate::read_input_bytes(&src).map_err(|e| e.to_string())).and_then(
-                    |bytes| pdfcraft_engine::ocr::recognize_file(&name, std::sync::Arc::new(bytes), None, settings.clone(), &ocr, |_, _| true),
+                    |bytes| pdfcraft_engine::ocr::recognize_file(&name, std::sync::Arc::new(bytes), None, settings.clone(), None, &ocr, |_, _| true),
                 );
             out.push(match result {
                 Ok(r) => {
                     let target = child(&folder, &name);
                     write_atomic(&target, &r.bytes)?;
                     let skipped: Vec<usize> = r.pages.iter().filter(|p| p.skipped.is_some()).map(|p| p.page + 1).collect();
-                    json!({ "path": p, "output": target.to_string_lossy(), "words": r.words(), "skipped_pages": skipped })
+                    let replaced: Vec<usize> = r.pages.iter().filter(|p| p.replaced.is_some()).map(|p| p.page + 1).collect();
+                    let mut file = json!({ "path": p, "output": target.to_string_lossy(), "words": r.words(), "skipped_pages": skipped, "replaced_pages": replaced });
+                    read_as(&mut file, r.language, r.fallback.as_ref());
+                    file
                 }
                 Err(e) => json!({ "path": p, "error": e }),
             });
@@ -650,24 +656,61 @@ impl Automation {
         let (id, copy) = (doc.id, doc.allows_copying());
         let found = self.session.recognize_text(id, &pages, settings).map_err(failed)?;
         let list: Vec<Value> = found
+            .pages
             .iter()
-            .map(|p| match &p.skipped {
-                Some(why) => json!({ "page": p.page + 1, "skipped": why }),
-                None if copy => json!({ "page": p.page + 1, "words": p.words.len(), "already_on_page": p.already_on_page, "text": p.text() }),
-                None => json!({ "page": p.page + 1, "words": p.words.len(), "already_on_page": p.already_on_page }),
+            .map(|p| {
+                let mut page = match &p.skipped {
+                    Some(why) => json!({ "page": p.page + 1, "skipped": why }),
+                    None if copy => json!({ "page": p.page + 1, "words": p.words.len(), "already_on_page": p.already_on_page, "text": p.text() }),
+                    None => json!({ "page": p.page + 1, "words": p.words.len(), "already_on_page": p.already_on_page }),
+                };
+                if let Some(n) = p.replaced {
+                    page["replaced_words"] = json!(n);
+                }
+                page
             })
             .collect();
-        Ok(json!({ "words": found.iter().map(|p| p.words.len()).sum::<usize>(), "pages": list }))
+        let mut out = json!({ "words": found.words(), "pages": list, "replaced_pages": found.replaced_pages() });
+        read_as(&mut out, found.language, found.fallback.as_ref());
+        Ok(out)
     }
 
     /// Whether text recognition's models are installed, the directories searched for them (in
-    /// order), and the languages it reads, each as a code and a name.
+    /// order), and the languages it reads, each with its code, name, reader and whether it can
+    /// be read now.
     pub(crate) fn ocr_status(&self) -> Result<Value> {
         use pdfcraft_engine::ocr;
         let dirs: Vec<String> = ocr::Models::search_dirs().iter().map(|d| d.to_string_lossy().into_owned()).collect();
-        let langs: Vec<Value> = ocr::LANGUAGES.iter().map(|l| json!({ "code": l.code, "name": l.name })).collect();
+        let langs: Vec<Value> = ocr::statuses(None)
+            .into_iter()
+            .map(|(l, a)| {
+                let state = match a {
+                    ocr::Availability::Ready => "ready",
+                    ocr::Availability::FallsBackToEnglish => "falls_back_to_english",
+                    ocr::Availability::Missing => "missing",
+                };
+                let reader = match l.reader {
+                    ocr::Reader::Ocrs => "ocrs",
+                    ocr::Reader::PpOcr => "pp-ocr",
+                };
+                json!({ "code": l.code, "name": l.name, "state": state, "reader": reader })
+            })
+            .collect();
         Ok(json!({ "available": ocr::available(), "search_dirs": dirs, "languages": langs }))
     }
+}
+
+/// Add to an OCR result the language the text was read as and, when the one asked for fell back
+/// to English, that language (`fell_back_from`) and why (`fallback_reason`); both are null when
+/// it didn't, so a client can always read them.
+pub(crate) fn read_as(out: &mut Value, language: &pdfcraft_engine::ocr::Language, fallback: Option<&pdfcraft_engine::ocr::Fallback>) {
+    use pdfcraft_engine::ocr::FallbackReason;
+    out["language"] = json!(language.code);
+    out["fell_back_from"] = json!(fallback.map(|f| f.from.code));
+    out["fallback_reason"] = json!(fallback.map(|f| match &f.reason {
+        FallbackReason::NotInstalled => format!("the {} recognition model isn't installed", f.from.name),
+        FallbackReason::Unusable(why) => format!("the {} recognition model can't be used: {why}", f.from.name),
+    }));
 }
 
 /// The file name an input is written under: its own file name, or `document.pdf` when it has none.
@@ -1114,5 +1157,26 @@ mod shared_output_name_tests {
         let dot = shared_file_names(&targets(&["scan.pdf", "scan.pdf."]));
         assert_eq!(case.len(), if cfg!(any(windows, target_os = "macos")) { 2 } else { 0 }, "{case:?}");
         assert_eq!(dot.len(), if cfg!(windows) { 2 } else { 0 }, "{dot:?}");
+    }
+}
+
+#[cfg(test)]
+mod ocr_result_tests {
+    use super::*;
+    use pdfcraft_engine::ocr::{ENGLISH, Fallback, FallbackReason, language};
+
+    /// Every OCR result says which language it read; a fallback to English names the language
+    /// asked for and why, and is null otherwise, so a client can always read the fields.
+    #[test]
+    fn results_say_the_language_read_and_any_fallback() {
+        let mut out = json!({});
+        read_as(&mut out, language("fr").unwrap(), None);
+        assert_eq!(out, json!({ "language": "fr", "fell_back_from": null, "fallback_reason": null }));
+        let de = language("de").unwrap();
+        read_as(&mut out, ENGLISH, Some(&Fallback { from: de, reason: FallbackReason::NotInstalled }));
+        assert_eq!((&out["language"], &out["fell_back_from"]), (&json!("en"), &json!("de")));
+        assert!(out["fallback_reason"].as_str().unwrap().contains("German recognition model isn't installed"), "{out}");
+        read_as(&mut out, ENGLISH, Some(&Fallback { from: de, reason: FallbackReason::Unusable("bad dictionary".into()) }));
+        assert!(out["fallback_reason"].as_str().unwrap().ends_with("can't be used: bad dictionary"), "{out}");
     }
 }

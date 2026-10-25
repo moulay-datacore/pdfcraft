@@ -1741,6 +1741,13 @@ pub enum Edit {
         page: usize,
         words: Vec<pdfcraft_ocr::PlacedWord>,
     },
+    /// Scan & OCR ▸ Recognize text, reading a page again ([`ocr::OcrSettings::replace_ocr`]):
+    /// PdfCraft's own earlier OCR text on `page` ([`pdfcraft_edit::own_ocr_layers`]) is removed
+    /// and `words` put there instead. The rest of the page, an edited OCR layer included, stays.
+    ReplaceOcrText {
+        page: usize,
+        words: Vec<pdfcraft_ocr::PlacedWord>,
+    },
     /// Edit a PDF ▸ Edit text: replace the text of line `line` (from `Document::text_lines`) on
     /// `page`, in its own font when it can show it, else in Helvetica.
     EditTextLine {
@@ -2214,7 +2221,7 @@ impl Edit {
             Edit::MoveTag { .. } => Label::of("Move object"),
             Edit::MarkDecorative { .. } => Label::of("Mark figure as decorative"),
             Edit::MarkTagArtifact { .. } => Label::of("Mark content as artifact"),
-            Edit::AddOcrText { .. } => Label::of("Recognize text"),
+            Edit::AddOcrText { .. } | Edit::ReplaceOcrText { .. } => Label::of("Recognize text"),
             Edit::ApplyScriptChanges { .. } => Label::of("Run JavaScript"),
             Edit::XfaEvent { .. } => Label::of("Run form script"),
             // The level is the standard's own name ("PDF/A-2b"), so it goes in as it stands.
@@ -2430,6 +2437,7 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::MarkDecorative { .. }
         | Edit::MarkTagArtifact { .. }
         | Edit::AddOcrText { .. }
+        | Edit::ReplaceOcrText { .. }
         | Edit::SetDocumentScript { .. }
         | Edit::SetFieldScript { .. }
         | Edit::RemoveStandardId { .. }
@@ -2780,7 +2788,11 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::RemoveStandardId { standard } => pdfcraft_organize::remove_standard_id(doc, *standard)?,
         Edit::SetDocumentScript { name, script } => pdfcraft_forms::set_document_script(doc, name, script.as_deref())?,
         Edit::AddOcrText { page, words } => {
-            pdfcraft_edit::stamp(doc, *page, "OCR", pdfcraft_ocr::text_layer(words))?;
+            pdfcraft_edit::stamp(doc, *page, pdfcraft_edit::OCR_TAG, pdfcraft_ocr::text_layer(words))?;
+        }
+        Edit::ReplaceOcrText { page, words } => {
+            pdfcraft_edit::remove_own_ocr_layers(doc, *page)?;
+            pdfcraft_edit::stamp(doc, *page, pdfcraft_edit::OCR_TAG, pdfcraft_ocr::text_layer(words))?;
         }
         Edit::EditPageImage { page, index, change } => {
             let img = pdfcraft_edit::page_images(doc, *page)?
@@ -3241,6 +3253,8 @@ pub struct Session {
     date_format: Option<String>,
     /// Preferences ▸ Date format ▸ Language, when not following the interface language.
     date_language: Option<String>,
+    /// Recognize Text's language when a run names none (see [`Session::set_ocr_language`]).
+    ocr_language: Option<&'static pdfcraft_ocr::Language>,
     /// What the XFA scripts' time limits are multiplied by (`None`: 1); see
     /// [`Session::with_xfa_time_scale`].
     xfa_time_scale: Option<u32>,

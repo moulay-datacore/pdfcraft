@@ -835,6 +835,12 @@ pub struct PdfCraftApp {
     pub ocr_draft: ocr_ui::OcrDraft,
     pub ocr_run: Option<ocr_ui::OcrRun>,
     pub ocr_batch: Option<std::sync::Arc<std::sync::Mutex<ocr_ui::BatchProgress>>>,
+    /// The OCR models to read with: `None` finds them ([`pdfcraft_engine::ocr::Models::find`]);
+    /// tests name their own.
+    pub ocr_models: Option<pdfcraft_engine::ocr::Models>,
+    /// Which pages of a document have PdfCraft's own OCR text, as of its edit generation: the
+    /// Recognize Text dialog asks every frame.
+    pub(crate) ocr_own_text: Option<(DocId, u64, Vec<usize>)>,
     /// Background jobs (OCR, actions, listing pinned folders) run inline instead (tests).
     pub run_inline: bool,
     /// Action Wizard: the user's actions, the dialog state, the running action and (tests) the
@@ -1212,6 +1218,8 @@ impl PdfCraftApp {
             ocr_draft: ocr_ui::OcrDraft::default(),
             ocr_run: None,
             ocr_batch: None,
+            ocr_models: None,
+            ocr_own_text: None,
             run_inline: false,
             custom_actions: Vec::new(),
             wizard: Default::default(),
@@ -2690,6 +2698,8 @@ impl PdfCraftApp {
         v["organize_zoom"] = serde_json::json!(self.organize_zoom);
         // Canonical names survive changes to the order of PAPERS and do not depend on UI language.
         v["print_paper"] = serde_json::json!(pdfcraft_engine::print::PAPERS.get(self.print_draft.paper).map(|(name, _)| *name));
+        // Recognize Text's language, once the user has picked one; null follows each document.
+        v["ocr_language"] = serde_json::json!(self.session.ocr_language().map(|l| l.code));
         v.to_string()
     }
 
@@ -2808,6 +2818,11 @@ impl PdfCraftApp {
         }
         if let Some(l) = v["date_language"].as_str() {
             let _ = self.session.set_date_language(Some(l));
+        }
+        // Settings are untrusted: a language text recognition doesn't read is refused, and the
+        // default (each document's own language) stays.
+        if let Some(l) = v["ocr_language"].as_str() {
+            let _ = self.session.set_ocr_language(Some(l));
         }
         // An empty or missing name keeps the login-name default; settings are untrusted, so the
         // name is cut to a sane length.
@@ -2942,6 +2957,11 @@ impl PdfCraftApp {
             }
             ("date-format", _) => self.session.set_date_format(value)?,
             ("date-language", _) => self.session.set_date_language(Some(value).filter(|v| *v != "auto"))?,
+            // Recognize Text's language, as if picked in its dialog; `auto` follows each document.
+            ("ocr-language", _) => {
+                self.session.set_ocr_language(Some(value).filter(|v| *v != "auto"))?;
+                self.seed_ocr_language();
+            }
             ("tool", _) => {
                 let g = pdfcraft_engine::catalog::group(value).ok_or_else(|| format!("unknown tool {value}"))?;
                 self.select_tool(g.id);
@@ -2973,7 +2993,10 @@ impl PdfCraftApp {
                     "export-text" => Some(Dialog::Export(export_ui::ExportKind::Text)),
                     "export-all-images" => Some(Dialog::Export(export_ui::ExportKind::AllImages)),
                     "accessibility-options" => Some(Dialog::AccessibilityOptions),
-                    "recognize-text" => Some(Dialog::RecognizeText),
+                    "recognize-text" => {
+                        self.seed_ocr_language();
+                        Some(Dialog::RecognizeText)
+                    }
                     "js-console" => Some(Dialog::JsConsole),
                     "document-js" => Some(Dialog::DocumentJs),
                     "preferences" => Some(Dialog::Preferences),

@@ -208,6 +208,17 @@ The desktop UI asks Allow/Cancel before following absolute GoToR targets and dis
 complete path. Relative links retain their existing behavior. Named destinations remain
 unapplied with a warning.
 
+## OCR
+
+`ocr_recognize`, `ocr_recognize_files` and the `ocr` step of `doc_batch` take `language` (`en`,
+`fr`, `de`, `es`, `it`, `pt`, `nl`; default: the document's `/Lang` when OCR reads it, else
+`en`) and `replace_ocr` (read pages again in place of the OCR text PdfCraft added before; an
+edited layer and other text stay). Every result names the language read (`language`) and, when
+a language's model is missing or can't be loaded and the pages were read as English instead,
+the one asked for (`fell_back_from`) and why (`fallback_reason`). `ocr_status` lists each
+language with its reader and state (`ready`, `falls_back_to_english`, `missing`). Paths go
+through `--root` confinement as for every other tool.
+
 ## Folder batches
 
 `doc_batch` runs conversion, OCR and compression over files and optionally recursive

@@ -1928,6 +1928,8 @@ mod tests {
             add(header);
         }
         crate::credits::MODEL_COLUMNS.iter().for_each(|s| add(s));
+        // Recognize Text's languages, shown by their English names through `tl!`.
+        pdfcraft_engine::ocr::LANGUAGES.iter().for_each(|l| add(l.name));
         // (context, source) keys; `@id` rows only reword a command label, which is in `plain`.
         let mut keys: BTreeSet<(String, String)> = plain.into_iter().map(|s| (String::new(), s)).collect();
         for language in &LANGUAGES {

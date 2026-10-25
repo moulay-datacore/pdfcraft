@@ -200,6 +200,28 @@ fn batch_ocr_uses_existing_models_or_reports_the_missing_models_per_file() {
     }
 }
 
+/// The ocr step reads the language asked for and its log says which one it read and whether
+/// it fell back to English (#4659 started this): a language it doesn't read is refused.
+#[test]
+fn batch_ocr_reads_the_language_asked_for_and_says_which_it_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("page.pdf"), pdf()).unwrap();
+    let mut auto = Automation::new().with_root(dir.path()).unwrap();
+    let refused = auto.call("doc_batch", &json!({"paths":["page.pdf"],"steps":["ocr"],"language":"xx","out_dir":"out"})).unwrap_err();
+    assert!(refused.to_string().contains("en, fr, de"), "{refused}");
+    let report = result(&mut auto, json!({"paths":["page.pdf"],"steps":["ocr"],"language":"fr","replace_ocr":true,"out_dir":"out"}));
+    if pdfcraft_engine::ocr::available() {
+        assert_eq!(report["completed"], 1, "{report}");
+        let step = &report["files"][0]["steps"][0];
+        // The page has text of its own, so it is skipped before anything is read in any language.
+        assert_eq!((&step["skipped_pages"], &step["replaced_pages"]), (&json!(1), &json!(0)), "{report}");
+        assert_eq!((&step["language"], &step["fell_back_from"]), (&json!("fr"), &json!(null)), "{report}");
+    } else {
+        assert_eq!(report["failed"], 1, "{report}");
+        assert!(report["files"][0]["error"].as_str().unwrap().contains("model"), "{report}");
+    }
+}
+
 #[test]
 fn batch_output_collisions_are_safe_under_concurrent_writers() {
     let dir = tempfile::tempdir().unwrap();

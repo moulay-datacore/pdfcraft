@@ -122,10 +122,13 @@ impl Session {
         if !ocr::available() {
             return Vec::new();
         }
-        let (Ok(engine), Some(job)) = (ocr::engine(), self.ocr_job(id, &[page], ocr::OcrSettings::default())) else {
+        // Read in the document's language (the session's OCR language, else its /Lang), so
+        // labels keep their accents.
+        let (Ok(engine), Ok(job)) = (ocr::engine(), self.ocr_job(id, &[page], ocr::OcrSettings::default())) else {
             return Vec::new();
         };
         job.run(&engine, |_, _| true)
+            .pages
             .into_iter()
             .flat_map(|p| p.words)
             .filter_map(|w| {

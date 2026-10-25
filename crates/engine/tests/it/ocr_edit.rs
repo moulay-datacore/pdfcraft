@@ -114,6 +114,22 @@ fn ocr_words_group_into_phrases_that_edit_in_place() {
     assert!((blocks[1].rect[0] - john[0]).abs() < 1.0, "the new word starts where the old one did: {:?} vs {john:?}", blocks[1].rect);
 }
 
+/// A corrected OCR word is the user's text: once a word of the layer is rewritten, the layer is
+/// no longer only PdfCraft's OCR text, so reading the page again with `replace_ocr` keeps it and
+/// the correction isn't lost.
+#[test]
+fn an_edited_ocr_layer_is_not_replaced() {
+    let (mut s, id) = scanned_with(vec![word("EMPLOYEE", 10.0, 60.0, 70.0), word("NAME", 64.0, 90.0, 70.0), word("John", 120.0, 145.0, 70.0)]);
+    assert_eq!(s.own_ocr_pages(id, &[]), [0]);
+    s.apply(id, Edit::EditTextBlock { page: 0, block: 1, text: "Jane".into(), style: Default::default() }).unwrap();
+    assert_eq!(s.own_ocr_pages(id, &[]), Vec::<usize>::new(), "the edited layer is the user's now");
+    s.apply(id, Edit::ReplaceOcrText { page: 0, words: vec![word("Again", 10.0, 40.0, 20.0)] }).unwrap();
+    let texts: Vec<String> = s.get(id).unwrap().text_blocks(0).iter().map(|b| b.text.clone()).collect();
+    for kept in ["EMPLOYEE NAME", "Jane", "Again"] {
+        assert!(texts.iter().any(|t| t == kept), "{kept:?} in {texts:?}");
+    }
+}
+
 /// Several words of one OCR phrase rewrite as one line, without wrapping onto the line below.
 #[test]
 fn a_longer_ocr_phrase_grows_rightwards() {

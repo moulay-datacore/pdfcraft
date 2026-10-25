@@ -32,9 +32,16 @@ only `.pdf` inputs are processed. Unsupported extensions are reported as skipped
   These settings can lose image detail. A candidate that is not smaller retains
   the bytes entering that step. This is not an images-only or lossless preset.
 - `ocr` uses the installed engine and its supported languages. `--dpi` (72–600,
-  default 300), `--language` (default `en`) and `--ocr-all-pages` configure it.
-  By default pages already containing text are skipped. Missing models are
-  reported as file errors; nothing is downloaded or installed by the batch.
+  default 300), `--language`, `--ocr-all-pages` and `--replace-ocr` configure it.
+  `--language` is `en` (the Latin alphabet without accents) or `fr`, `de`, `es`,
+  `it`, `pt` or `nl` (read with their accents); without it each file is read in its
+  own language (its `/Lang`) when text recognition reads that, else in English. A
+  language whose model is missing is read as English, and the file's `ocr` step log
+  says so (`language`, `fell_back_from`, `fallback_reason`). By default pages already
+  containing text are skipped. `--replace-ocr` reads pages again whose only text is
+  OCR text PdfCraft added earlier and replaces it (`replaced_pages`); other text is
+  kept. Missing models are reported as file errors; nothing is downloaded or
+  installed by the batch.
 - `--stop-on-error` stops processing after the first file error. By default the
   remaining files continue. Earlier successful outputs stay, and unprocessed
   files are listed as skipped. A file is published only after all its steps succeed.
@@ -69,7 +76,8 @@ The same implementation is available as `doc_batch`:
 In `pdfcraft-cli run --script`, put this object in the `args` of a `doc_batch`
 step. MCP marks a report with failed files as `isError: true` and retains the
 structured report. Tool names and OCR settings match the existing automation API
-(`skip_text_pages: false` corresponds to `--ocr-all-pages`).
+(`skip_text_pages: false` corresponds to `--ocr-all-pages`, `replace_ocr: true` to
+`--replace-ocr`).
 
 ## Boundaries
 

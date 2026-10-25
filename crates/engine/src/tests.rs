@@ -4536,6 +4536,116 @@ fn recognize_text_reads_the_euro_sign() {
 }
 
 const SYNTHETIC_SCAN_DPI: f64 = 300.0;
+/// A scan, at [`SYNTHETIC_SCAN_DPI`], of `text` set in Helvetica (WinAnsiEncoding) by Create,
+/// without a text layer.
+fn synthetic_scan_of(s: &mut Session, text: &str) -> DocId {
+    let source = s.create_from_text("t", text).unwrap();
+    let id = s.open("text.pdf", None, source, None).unwrap();
+    let png = export::Exporter::new(s.get(id).unwrap()).png(0, SYNTHETIC_SCAN_DPI).unwrap();
+    let scan = s.create_from_images_with_resolution(&[("scan.png".into(), png)], ImageResolution::Dpi(SYNTHETIC_SCAN_DPI)).unwrap();
+    s.open("scan.pdf", None, scan, None).unwrap()
+}
+
+/// French is read with its accents: a scan of Helvetica text read in French has every accented
+/// letter and sign, and no `?` (needs the accented-Latin model, `cargo xtask models`; skipped
+/// without it).
+#[test]
+fn recognize_text_reads_french_accents() {
+    let fr = ocr::language("fr").unwrap();
+    if ocr::availability(fr) != ocr::Availability::Ready {
+        eprintln!("skipped: the French recognition model is not installed");
+        return;
+    }
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let id = synthetic_scan_of(&mut s, "Le médecin à l'hôpital, garçon, cœur, « été » 90°");
+    let found = s.recognize_text(id, &[], ocr::OcrSettings { language: Some("fr".into()), ..Default::default() }).unwrap();
+    assert_eq!((found.language, &found.fallback), (fr, &None));
+    let text = page_texts(&s, id)[0].clone();
+    // Whole words where the reading is steady; "cœur" is read "cœeur" at some resolutions, so
+    // its letter is checked on its own.
+    for word in ["médecin", "à", "hôpital", "garçon", "œ", "«", "été", "»", "90°"] {
+        assert!(text.contains(word), "{word:?} in {text:?}");
+    }
+    assert!(!text.contains('?'), "{text}");
+}
+
+/// A language whose model is missing is read as English, and the result says so; one whose
+/// model is damaged too, with why. English never falls back (needs the English models; skipped
+/// without them).
+#[test]
+fn a_language_without_its_model_is_read_as_english_and_says_so() {
+    let Some(installed) = ocr::Models::find().filter(|m| m.recognition.is_some()) else {
+        eprintln!("skipped: OCR models not installed");
+        return;
+    };
+    let fr = ocr::language("fr").unwrap();
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let (id, _) = synthetic_ocr_scan(&mut s);
+    let read = |models: &ocr::Models, language: &str| {
+        let ocr = ocr::engine_for(models).unwrap();
+        s.ocr_job(id, &[], ocr::OcrSettings { language: Some(language.into()), ..Default::default() }).unwrap().run(&ocr, |_, _| true)
+    };
+    let english_only = ocr::Models { latin: None, ..installed.clone() };
+    let outcome = read(&english_only, "fr");
+    assert_eq!(outcome.language, ocr::ENGLISH);
+    assert_eq!(outcome.fallback, Some(ocr::Fallback { from: fr, reason: ocr::FallbackReason::NotInstalled }));
+    assert!(outcome.pages[0].text().to_lowercase().contains("quick"), "{:?}", outcome.pages);
+
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-damaged-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(pdfcraft_ocr::LATIN_MODEL), b"not a model").unwrap();
+    std::fs::write(dir.join(pdfcraft_ocr::LATIN_DICT), "a\nb\n").unwrap();
+    let latin = pdfcraft_ocr::LatinModel { model: dir.join(pdfcraft_ocr::LATIN_MODEL), dict: dir.join(pdfcraft_ocr::LATIN_DICT) };
+    let damaged = ocr::Models { latin: Some(latin), ..installed };
+    let outcome = read(&damaged, "fr");
+    assert_eq!(outcome.language, ocr::ENGLISH);
+    assert!(matches!(&outcome.fallback, Some(ocr::Fallback { from, reason: ocr::FallbackReason::Unusable(why) }) if *from == fr && !why.is_empty()));
+    assert_eq!(read(&english_only, "en").fallback, None);
+
+    // Replacing doesn't trade the earlier text for a reading without its accents.
+    let earlier = ocr::PlacedWord { text: "Déjà".into(), origin: [72.0, 700.0], across: [50.0, 0.0], up: [0.0, 10.0] };
+    s.apply(id, Edit::AddOcrText { page: 0, words: vec![earlier] }).unwrap();
+    let ocr = ocr::engine_for(&english_only).unwrap();
+    let job = s.ocr_job(id, &[], ocr::OcrSettings { language: Some("fr".into()), replace_ocr: true, ..Default::default() }).unwrap();
+    let outcome = job.run(&ocr, |_, _| true);
+    assert!(outcome.fallback.is_some() && outcome.pages[0].skipped.is_some() && outcome.pages[0].replaced.is_none(), "{outcome:?}");
+    s.apply_ocr(id, &outcome.pages).unwrap();
+    assert_eq!(page_texts(&s, id)[0], "Déjà", "the earlier text stays");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reading a page again with `replace_ocr` swaps PdfCraft's earlier OCR text for the new
+/// reading in one undoable step: the page is read instead of being skipped for having text, the
+/// earlier words are gone, and one undo brings them back (needs the models; skipped without
+/// them).
+#[test]
+fn recognize_text_again_replaces_its_own_earlier_text() {
+    if !ocr::available() {
+        eprintln!("skipped: OCR models not installed");
+        return;
+    }
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let (id, _) = synthetic_ocr_scan(&mut s);
+    // An earlier, poor reading.
+    let earlier = ["Teh", "qiuck"].iter().enumerate().map(|(i, t)| ocr::PlacedWord {
+        text: (*t).into(),
+        origin: [72.0 + 60.0 * i as f64, 700.0],
+        across: [50.0, 0.0],
+        up: [0.0, 10.0],
+    });
+    s.apply(id, Edit::AddOcrText { page: 0, words: earlier.collect() }).unwrap();
+    assert!(s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap().pages[0].skipped.is_some(), "without replace_ocr it is skipped");
+
+    let again = s.recognize_text(id, &[], ocr::OcrSettings { replace_ocr: true, ..Default::default() }).unwrap();
+    assert_eq!((again.pages[0].skipped.as_deref(), again.pages[0].replaced, again.replaced_pages()), (None, Some(2), 1), "{:?}", again.pages);
+    let text = page_texts(&s, id)[0].to_lowercase();
+    assert!(text.contains("quick") && text.contains("lazy") && !text.contains("qiuck") && !text.contains("teh"), "{text}");
+    assert_eq!(text.matches("quick").count(), 1, "{text}");
+    assert_eq!(s.get(id).unwrap().can_undo(), Some("Recognize text"));
+    s.undo(id).unwrap();
+    let text = page_texts(&s, id)[0].to_lowercase();
+    assert!(text.contains("qiuck") && !text.contains("lazy"), "one undo brings the earlier text back: {text}");
+}
 
 /// A scan of the OCR sentence at the source page's physical size, without a text layer.
 fn synthetic_ocr_scan(s: &mut Session) -> (DocId, [f32; 2]) {
@@ -4574,7 +4684,7 @@ fn recognize_text_makes_a_scanned_page_searchable() {
     let (id, _) = synthetic_ocr_scan(&mut s);
     assert_eq!(page_texts(&s, id), [""], "a picture has no text");
 
-    let found = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap();
+    let found = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap().pages;
     assert_eq!(found.len(), 1);
     let text = page_texts(&s, id)[0].to_lowercase();
     for w in ["quick", "brown", "fox", "lazy"] {
@@ -4591,7 +4701,7 @@ fn recognize_text_makes_a_scanned_page_searchable() {
     assert!(q.origin[0] < l.origin[0] && (top(q) - top(l)).abs() < line_tolerance, "{q:?} {l:?}");
 
     // A second pass skips the page: it has text now.
-    let again = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap();
+    let again = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap().pages;
     assert!(again[0].skipped.is_some());
 }
 
@@ -4619,12 +4729,12 @@ fn recognize_text_reads_a_picture_on_a_page_that_has_text() {
     let count = |s: &Session, word: &str| page_texts(s, id)[0].to_lowercase().matches(word).count();
     assert_eq!((count(&s, "invoice"), count(&s, "brown")), (1, 0));
 
-    let skipped = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap();
+    let skipped = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap().pages;
     assert!(skipped[0].skipped.is_some(), "pages with text are still skipped by default");
     assert_eq!(s.get(id).unwrap().can_undo(), Some("Add text"), "nothing was added");
 
     let hybrid = ocr::OcrSettings { skip_text_pages: false, ..Default::default() };
-    let found = s.recognize_text(id, &[], hybrid.clone()).unwrap();
+    let found = s.recognize_text(id, &[], hybrid.clone()).unwrap().pages;
     assert_eq!(found[0].skipped, None);
     assert!(found[0].already_on_page >= 2, "the page's own words were recognised and left out: {:?}", found[0]);
     let added = found[0].text().to_lowercase();
@@ -4633,7 +4743,7 @@ fn recognize_text_reads_a_picture_on_a_page_that_has_text() {
     assert_eq!(s.get(id).unwrap().can_undo(), Some("Recognize text"));
 
     // Reading the page again adds nothing: every word is there now.
-    let again = s.recognize_text(id, &[], hybrid).unwrap();
+    let again = s.recognize_text(id, &[], hybrid).unwrap().pages;
     assert!(again[0].words.is_empty(), "{:?}", again[0]);
     assert_eq!((count(&s, "invoice"), count(&s, "brown")), (1, 1));
 }
@@ -4676,9 +4786,9 @@ fn native_text_only_ignores_comments_but_not_page_text() {
     // A comment over the picture: the default run counts it as text and skips the page, the
     // native-text run reads the picture.
     let id = comment_only(&mut s);
-    let skipped = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap();
+    let skipped = s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap().pages;
     assert!(skipped[0].skipped.is_some(), "a comment is text for the default run");
-    let found = s.recognize_text(id, &[], native.clone()).unwrap();
+    let found = s.recognize_text(id, &[], native.clone()).unwrap().pages;
     assert_eq!(found[0].skipped, None, "{:?}", found[0]);
     assert!(found[0].text().to_lowercase().contains("brown"), "{:?}", found[0]);
 
@@ -4690,7 +4800,7 @@ fn native_text_only_ignores_comments_but_not_page_text() {
     };
     let note = AddedText { rect: [w * 0.1, h * 0.6, w * 0.9, h * 0.7], text: "Page text".into(), size: 18.0, ..Default::default() };
     s.apply(id, Edit::AddText { page: 0, text: note }).unwrap();
-    let skipped = s.recognize_text(id, &[], native).unwrap();
+    let skipped = s.recognize_text(id, &[], native).unwrap().pages;
     assert!(skipped[0].skipped.is_some(), "{:?}", skipped[0]);
 }
 

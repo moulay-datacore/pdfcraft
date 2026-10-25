@@ -152,7 +152,11 @@ fn apply_step(s: &mut Session, id: DocId, step: &Step, log: &mut Vec<String>) ->
     let edit = match step {
         Step::RecognizeText => {
             let found = s.recognize_text(id, &[], crate::ocr::OcrSettings::default()).map_err(EditError::Invalid)?;
-            log.push(format!("Recognize text: {} words", found.iter().map(|p| p.words.len()).sum::<usize>()));
+            let mut line = format!("Recognize text: {} words", found.words());
+            if let Some(f) = &found.fallback {
+                line.push_str(&format!(" (read as English instead of {})", f.from.name));
+            }
+            log.push(line);
             return Ok(None);
         }
         Step::ReduceFileSize => {

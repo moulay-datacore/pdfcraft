@@ -32,7 +32,7 @@ impl<'a> Recipe<'a> {
                 return Err(Args::wrong("steps", "unique convert/ocr/optimize steps, with convert first when present"));
             }
         }
-        for (keys, step) in [(&["ppi", "quality"][..], "optimize"), (&["dpi", "language", "skip_text_pages"][..], "ocr")] {
+        for (keys, step) in [(&["ppi", "quality"][..], "optimize"), (&["dpi", "language", "skip_text_pages", "replace_ocr"][..], "ocr")] {
             if !steps.contains(&step) && keys.iter().any(|k| args.get(k).is_some()) {
                 return Err(failed(format!("{} settings need the {step} step", keys.join("/"))));
             }
@@ -79,10 +79,15 @@ impl<'a> Recipe<'a> {
                 "convert" => bytes = session.convert_to_pdf(name, &bytes)?.1,
                 "ocr" => {
                     let engine = ocr::engine().map_err(failed)?;
-                    let result = ocr::recognize_file(name, bytes, None, self.ocr.clone(), &engine, |_, _| true).map_err(failed)?;
-                    log.push(
-                        json!({"step":"ocr","words":result.words(),"skipped_pages":result.pages.iter().filter(|p| p.skipped.is_some()).count()}),
-                    );
+                    let result = ocr::recognize_file(name, bytes, None, self.ocr.clone(), None, &engine, |_, _| true).map_err(failed)?;
+                    let mut entry = json!({
+                        "step": "ocr",
+                        "words": result.words(),
+                        "skipped_pages": result.pages.iter().filter(|p| p.skipped.is_some()).count(),
+                        "replaced_pages": result.pages.iter().filter(|p| p.replaced.is_some()).count(),
+                    });
+                    crate::a11y::read_as(&mut entry, result.language, result.fallback.as_ref());
+                    log.push(entry);
                     bytes = result.bytes;
                     continue;
                 }

@@ -1,8 +1,9 @@
 //! Scan & OCR ▸ Recognize text in the real shell (egui_kittest): the dialog, the run and its
 //! result (skipped without the OCR models: `cargo xtask models`).
 
+use egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use pdfcraft_engine::{AddedText, Edit, Session, export};
 use pdfcraft_ui_egui::PdfCraftApp;
 
@@ -347,4 +348,173 @@ fn only_the_edit_tool_recognizes_a_scanned_page() {
     let id = h.state().active_ids().unwrap().1;
     h.run_steps(6);
     assert_eq!(h.state().session.get(id).unwrap().can_undo(), None);
+}
+
+/// Models whose files aren't there: the picker judges a language from which models are named
+/// (`Models::availability`), so its states can be shown without the real ones.
+fn models(english: bool, latin: bool) -> pdfcraft_engine::ocr::Models {
+    let dir = std::path::Path::new("/nonexistent/pdfcraft-models");
+    pdfcraft_engine::ocr::Models {
+        detection: dir.join("text-detection.rten"),
+        recognition: english.then(|| dir.join("text-recognition.rten")),
+        latin: latin.then(|| pdfcraft_engine::ocr::LatinModel { model: dir.join("latin.onnx"), dict: dir.join("dict.txt") }),
+    }
+}
+
+/// The Recognize Text dialog over `pdf`, reading with `models` (the installed ones when `None`).
+fn recognize_dialog(pdf: Vec<u8>, models: Option<pdfcraft_engine::ocr::Models>) -> Harness<'static, PdfCraftApp> {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.ocr_models = models;
+        app.open_bytes("scan.pdf", None, pdf).unwrap();
+        app.run_inline = true;
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("ocr.recognize"));
+    h.run_steps(2);
+    h
+}
+
+/// Open the language picker, which shows `chosen`.
+fn open_language_picker(h: &mut Harness<'static, PdfCraftApp>, chosen: &str) {
+    h.get_by(|n| n.role() == Role::ComboBox && n.value().as_deref() == Some(chosen)).click();
+    h.run_steps(6);
+}
+
+fn recognize_disabled(h: &Harness<'static, PdfCraftApp>) -> bool {
+    h.get_by_role_and_label(Role::Button, "Recognize text").accesskit_node().is_disabled()
+}
+
+const READ_AS_ENGLISH: &str = "This language's model isn't available: its text will be read as English, without accents.";
+
+/// Each language says what reading it will do: with only English installed, the others are read
+/// as English, and the dialog says so before the run (the result says it again after).
+#[test]
+fn the_language_picker_says_which_languages_are_read_as_english() {
+    let mut h = recognize_dialog(scan(), Some(models(true, false)));
+    assert!(h.query_by_label(READ_AS_ENGLISH).is_none(), "English is read as itself");
+    open_language_picker(&mut h, "English");
+    for name in ["French", "German", "Spanish", "Italian", "Portuguese", "Dutch"] {
+        assert!(h.query_by_label(&format!("{name} — read as English")).is_some(), "{name}");
+    }
+    h.get_by_label("French — read as English").click();
+    h.run_steps(4);
+    assert_eq!(h.state().ocr_draft.language, "fr");
+    assert_eq!(h.state().session.ocr_language().map(|l| l.code), Some("fr"), "the pick is remembered for later documents");
+    assert!(h.query_by_label(READ_AS_ENGLISH).is_some(), "the note says so before the run");
+    assert!(!recognize_disabled(&h), "it can still be read, as English");
+    let saved: serde_json::Value = serde_json::from_str(&h.state().persist()).unwrap();
+    assert_eq!(saved["ocr_language"], "fr");
+}
+
+/// With only the accented-Latin model, English can't be read at all: it says so and Recognize
+/// waits for another language, which is read as itself.
+#[test]
+fn a_language_that_cannot_be_read_says_so_and_is_not_run() {
+    let mut h = recognize_dialog(scan(), Some(models(false, true)));
+    assert!(h.query_by(|n| n.role() == Role::ComboBox && n.value().as_deref() == Some("English — not installed")).is_some());
+    assert!(h.query_by_label("This language's model isn't installed.").is_some());
+    assert!(recognize_disabled(&h));
+    open_language_picker(&mut h, "English — not installed");
+    h.get_by_label("Italian").click();
+    h.run_steps(4);
+    assert_eq!(h.state().ocr_draft.language, "it");
+    assert!(h.query_by_label("This language's model isn't installed.").is_none());
+    assert!(h.query_by_label(READ_AS_ENGLISH).is_none(), "Italian is read as itself");
+    assert!(!recognize_disabled(&h));
+}
+
+/// "Replace existing OCR text" is offered only when a chosen page has text PdfCraft recognized
+/// before, and it is what the run is asked to do.
+#[test]
+fn replacing_earlier_ocr_text_is_offered_only_for_pages_that_have_some() {
+    let two_pages = {
+        let one = Session::new().create_from_images(&[("a.png".into(), page_png()), ("b.png".into(), page_png())]).unwrap();
+        one.to_vec()
+    };
+    let mut h = recognize_dialog(two_pages, None);
+    const REPLACE: &str = "Replace existing OCR text";
+    assert!(h.query_by_label(REPLACE).is_none(), "no page has OCR text yet");
+    // Text added by hand is not PdfCraft's OCR text.
+    let id = h.state().active_ids().unwrap().1;
+    let note = AddedText { rect: [40.0, 40.0, 300.0, 80.0], text: "Typed by hand".into(), size: 14.0, ..Default::default() };
+    h.state_mut().session.apply(id, Edit::AddText { page: 0, text: note }).unwrap();
+    h.run_steps(2);
+    assert!(h.query_by_label(REPLACE).is_none(), "typed text isn't replaced");
+    let words = vec![pdfcraft_engine::ocr::PlacedWord { text: "Recognized".into(), origin: [72.0, 100.0], across: [80.0, 0.0], up: [0.0, 14.0] }];
+    h.state_mut().session.apply(id, Edit::AddOcrText { page: 1, words }).unwrap();
+    h.run_steps(2);
+    assert!(h.query_by_label(REPLACE).is_some(), "all pages: page 2 has OCR text");
+    h.get_by_role_and_label(Role::RadioButton, "From").click();
+    (h.state_mut().ocr_draft.from, h.state_mut().ocr_draft.to) = (1, 1);
+    h.run_steps(2);
+    assert!(h.query_by_label(REPLACE).is_none(), "page 1 has none");
+    (h.state_mut().ocr_draft.from, h.state_mut().ocr_draft.to) = (2, 2);
+    h.run_steps(2);
+    assert!(!h.state().ocr_draft.settings().replace_ocr, "off until asked for");
+    h.get_by_label(REPLACE).click();
+    h.run_steps(2);
+    assert!(h.state().ocr_draft.replace && h.state().ocr_draft.settings().replace_ocr);
+}
+
+/// A plain white page picture.
+fn page_png() -> Vec<u8> {
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(60, 80, image::Rgba([250, 250, 250, 255])))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    png.into_inner()
+}
+
+/// The page's text, as search and copy see it.
+fn page_text(app: &PdfCraftApp) -> String {
+    let doc = app.session.get(app.active_ids().unwrap().1).unwrap();
+    let mut r = pdfcraft_render::PageRenderer::new(doc.bytes.clone(), Default::default());
+    let text = r.render(pdfcraft_render::RenderRequest { page: 0, kind: pdfcraft_render::RequestKind::Text, scale: 1.0, ..Default::default() });
+    text.text.unwrap().plain_text()
+}
+
+/// French through the dialog: read with its accents, then read again replacing the first
+/// reading in one undoable step (needs the accented-Latin model, `cargo xtask models`).
+#[test]
+fn recognize_text_reads_french_and_replaces_its_own_earlier_text() {
+    let fr = pdfcraft_engine::ocr::language("fr").unwrap();
+    if pdfcraft_engine::ocr::availability(fr) != pdfcraft_engine::ocr::Availability::Ready {
+        eprintln!("skipped: the French recognition model is not installed");
+        return;
+    }
+    let french = {
+        let mut s = Session::new();
+        let text = s.create_from_text("t", "Le médecin à l'hôpital, garçon").unwrap();
+        let id = s.open("text.pdf", None, text, None).unwrap();
+        let png = export::Exporter::new(s.get(id).unwrap()).png(0, 200.0).unwrap();
+        s.create_from_images(&[("scan.png".into(), png)]).unwrap().to_vec()
+    };
+    let mut h = recognize_dialog(french, None);
+    open_language_picker(&mut h, "English");
+    h.get_by_label("French").click();
+    h.run_steps(4);
+    h.get_by_label("Recognize text").click();
+    h.run_steps(3);
+    let toast = h.state().toast.clone().unwrap().0;
+    assert!(toast.starts_with("Recognized ") && toast.ends_with("on 1 page"), "{toast}");
+    let read = page_text(h.state());
+    assert!(read.contains("médecin") && read.contains("garçon") && !read.contains('?'), "{read}");
+
+    // Again, replacing the first reading.
+    assert!(h.state_mut().execute("ocr.recognize"));
+    h.run_steps(2);
+    assert_eq!(h.state().ocr_draft.language, "fr", "the pick is kept");
+    h.get_by_label("Replace existing OCR text").click();
+    h.run_steps(2);
+    h.get_by_label("Recognize text").click();
+    h.run_steps(3);
+    let toast = h.state().toast.clone().unwrap().0;
+    assert!(toast.ends_with("; replaced the earlier recognized text on 1 page"), "{toast}");
+    assert_eq!(page_text(h.state()).matches("médecin").count(), 1, "replaced, not added a second time");
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert_eq!(page_text(h.state()).matches("médecin").count(), 1, "one undo brings the first reading back");
 }
