@@ -9190,3 +9190,118 @@ fn font_collection_tools_select_and_embed_only_the_permitted_face() {
     assert!(rendered.iter().any(|c| matches!(c, Content::Png { .. })));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Generated scan pixels and independently stretched, invisible OCR words; no external assets.
+fn scanned_ocr_fixture() -> Vec<u8> {
+    use pdfcraft_cos::{Dict, Document, Object, Stream, write_incremental};
+    let mut cos = Document::open(std::sync::Arc::new(fixture(1))).unwrap();
+    let page = pdfcraft_model::pages(&cos)[0].clone();
+    let mut image = Dict::new();
+    image.set(b"Type".to_vec(), Object::name("XObject"));
+    image.set(b"Subtype".to_vec(), Object::name("Image"));
+    image.set(b"Width".to_vec(), Object::Int(2));
+    image.set(b"Height".to_vec(), Object::Int(2));
+    image.set(b"ColorSpace".to_vec(), Object::name("DeviceGray"));
+    image.set(b"BitsPerComponent".to_vec(), Object::Int(8));
+    let scan = cos.add(Object::Stream(Stream::flate(image, &[255, 224, 224, 255])));
+    let mut resources = cos.resolve(page.dict.get(b"Resources").unwrap()).as_dict().unwrap().clone();
+    let mut xobjects = Dict::new();
+    xobjects.set(b"Scan".to_vec(), Object::Ref(scan));
+    resources.set(b"XObject".to_vec(), Object::Dict(xobjects));
+    let body = b"q 200 0 0 300 0 0 cm /Scan Do Q
+/PCMark /OCR BDC BT /F1 1 Tf 3 Tr
+11.03 0 0 13.29 20 240 Tm (Lorem) Tj
+11.34 0 0 11.25 58 240.4 Tm (ipsum) Tj
+10.69 0 0 12.03 94 239.6 Tm (dolor) Tj
+12 0 0 10.78 124 239.5 Tm (SITAMET) Tj ET EMC
+/PCMark /OCR BDC BT /F1 1 Tf 3 Tr
+11 0 0 12 20 180 Tm (Alpha) Tj
+12 0 0 11 54 180.3 Tm (Beta) Tj ET EMC
+BT /F1 12 Tf 0 Tr 20 120 Td (Visible text) Tj ET";
+    let stream = cos.add(Object::Stream(Stream::flate(Dict::new(), body)));
+    cos.update_dict(page.obj, |d| {
+        d.set(b"Resources".to_vec(), Object::Dict(resources));
+        d.set(b"Contents".to_vec(), Object::Ref(stream));
+    })
+    .unwrap();
+    write_incremental(&cos, &Default::default()).unwrap()
+}
+
+#[test]
+fn ocr_paragraph_tools_report_scanned_sources() {
+    let dir = workdir("ocr-tool-flags");
+    std::fs::write(dir.join("scan.pdf"), scanned_ocr_fixture()).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({"path":"scan.pdf"}))["doc"].as_u64().unwrap();
+    let before = ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1}));
+    let blocks = before["paragraphs"].as_array().unwrap();
+    assert_eq!(blocks.len(), 3, "{before}");
+    assert_eq!(blocks[0]["ocr"], true);
+    assert_eq!(blocks[1]["ocr"], true);
+    assert_eq!(blocks[2]["ocr"], false);
+    let layout = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":"New OCR words"}));
+    assert_eq!(layout["ocr"], true);
+    assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1})), before, "layout is read-only");
+    let edited = ok(&mut a, "text_edit", json!({"doc":doc,"page":1,"paragraph":1,"text":"New OCR words"}));
+    assert_eq!(edited["ocr"], true);
+    assert_eq!(edited["paragraph"]["ocr"], true, "edit identifies its scanned source after revealing it");
+    let visible = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":3}));
+    assert_eq!(visible["ocr"], false);
+    ok(&mut a, "doc_save", json!({"doc":doc,"path":"edited-scan.pdf"}));
+    let reopened = ok(&mut a, "doc_open", json!({"path":"edited-scan.pdf"}))["doc"].as_u64().unwrap();
+    let text = page_text(&mut a, reopened).join("\n");
+    assert!(text.contains("New OCR words") && text.contains("Visible text"), "{text}");
+    let rendered = a.call("page_render", &json!({"doc":reopened,"page":1,"dpi":72})).unwrap();
+    assert!(rendered.iter().any(|c| matches!(c, Content::Png { .. })));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ocr_layout_accepts_the_same_standard_and_resource_font_choices_as_edit() {
+    let dir = workdir("ocr-tool-fonts");
+    std::fs::write(dir.join("scan.pdf"), scanned_ocr_fixture()).unwrap();
+    let installed_font = without_licence(&font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true), 0x0008);
+    std::fs::write(dir.join("face.otf"), &installed_font).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({"path":"scan.pdf"}))["doc"].as_u64().unwrap();
+    ok(&mut a, "page_duplicate", json!({"doc":doc,"pages":[1]}));
+    let helvetica = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":"iiiiii","font":"helvetica"}));
+    let times = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":"iiiiii","font":"times","bold":true,"italic":true}));
+    assert_ne!(times["draft_rect"], helvetica["draft_rect"], "preview must measure the selected family and style");
+    let courier = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":"iiiiii","font":"courier"}));
+    assert_ne!(courier["draft_rect"], helvetica["draft_rect"], "all standard families are accepted by preview");
+    let edited = ok(&mut a, "text_edit", json!({"doc":doc,"page":1,"paragraph":1,"text":"iiiiii","font":"times","bold":true,"italic":true}));
+    assert_eq!(edited["paragraph"]["font"], "Times-BoldItalic");
+    let default_layout = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":2,"text":"AB"}));
+    let chosen_layout =
+        ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":2,"text":"AB","font":"times","bold":true,"italic":true}));
+    assert_eq!(default_layout["draft_rect"], chosen_layout["draft_rect"], "preview reuses the document's OCR face");
+    let reused = ok(&mut a, "text_edit", json!({"doc":doc,"page":1,"paragraph":2,"text":"AB"}));
+    assert_eq!(reused["paragraph"]["font"], "Times-BoldItalic");
+    ok(&mut a, "edit_undo", json!({"doc":doc}));
+    let outside = dir.with_extension("outside.otf");
+    std::fs::write(&outside, font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true)).unwrap();
+    let refusal = err(&mut a, "text_font_import", json!({"doc":doc,"page":1,"path":outside,"installed":true}));
+    assert!(refusal.to_string().contains("outside the allowed directory"), "{refusal}");
+    std::fs::remove_file(&outside).unwrap();
+    assert!(a.call("text_font_import", &json!({"doc":doc,"page":1,"path":"face.otf"})).is_err(), "installed face requires its grant");
+    let imported = ok(&mut a, "text_font_import", json!({"doc":doc,"page":1,"path":"face.otf","installed":true}));
+    let layout =
+        ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":2,"text":"AB","font_resource":imported["resource"],"installed":true}));
+    assert_eq!(layout["ocr"], true);
+    let edited = ok(&mut a, "text_edit", json!({"doc":doc,"page":1,"paragraph":2,"text":"AB","font_resource":imported["resource"],"installed":true}));
+    assert_eq!(edited["paragraph"]["font"], "RectFont-Regular");
+    let real_fonts = ok(&mut a, "text_fonts", json!({"doc":doc,"page":2}));
+    assert!(real_fonts["fonts"].as_array().unwrap().is_empty(), "the other page has no registered replacement face");
+    let preview = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":2,"paragraph":1,"text":"AB"}));
+    let alias = preview["embedded_fonts"].as_array().unwrap().iter().find(|f| f["face"] == "RectFont-Regular").unwrap()["resource"].clone();
+    let chosen = ok(&mut a, "text_edit", json!({"doc":doc,"page":2,"paragraph":1,"text":"AB","font_resource":alias}));
+    assert_eq!(chosen["paragraph"]["font"], "RectFont-Regular", "OCR preview aliases are selectable through the same edit tool");
+    ok(&mut a, "doc_save", json!({"doc":doc,"path":"chosen-ocr-font.pdf"}));
+    std::fs::remove_file(dir.join("face.otf")).unwrap();
+    let reopened = ok(&mut a, "doc_open", json!({"path":"chosen-ocr-font.pdf"}))["doc"].as_u64().unwrap();
+    let saved = ok(&mut a, "text_paragraphs", json!({"doc":reopened,"page":1}));
+    assert_eq!(saved["paragraphs"][1]["font"], "RectFont-Regular");
+    assert_eq!(saved["paragraphs"][1]["text"], "AB");
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -641,6 +641,7 @@ impl Automation {
                             "lines": b.lines.iter().map(|l| l + 1).collect::<Vec<_>>(),
                             "rect": [r(u[0].min(v[0])), r(u[1].min(v[1])), r(u[0].max(v[0])), r(u[1].max(v[1]))],
                             "font": b.base_font,
+                            "ocr": b.invisible,
                             "size": (b.size * 100.0).round() / 100.0,
                         })
                     })
@@ -718,6 +719,8 @@ impl Automation {
                 let source = blocks.get(index).ok_or_else(|| ToolError::InvalidArgs("paragraph is out of range".into()))?;
                 let text = a.opt_str("text")?.unwrap_or(&source.editor_text);
                 let style = pdfcraft_engine::BlockStyle {
+                    family: a.text_font()?,
+                    bold: a.opt_bool("bold")?,
                     size: a.opt_num("size")?,
                     width: a.opt_num("width")?,
                     resource: a.opt_str("font_resource")?.map(str::to_owned),
@@ -731,8 +734,9 @@ impl Automation {
                     let b = info.user_to_view(r[2] as f32, r[3] as f32);
                     [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]
                 };
-                let fonts: Vec<_> = doc.text_editor_fonts(page).into_iter().map(|f| json!({"resource": f.resource, "face": f.face})).collect();
-                json!({ "page": page + 1, "paragraph": k, "source_rect": view_rect(layout.source_rect),
+                let fonts = if source.invisible { doc.ocr_text_editor_fonts(page) } else { doc.text_editor_fonts(page) };
+                let fonts: Vec<_> = fonts.into_iter().map(|f| json!({"resource": f.resource, "face": f.face})).collect();
+                json!({ "page": page + 1, "paragraph": k, "ocr": source.invisible, "source_rect": view_rect(layout.source_rect),
                     "draft_rect": layout.draft_rect.map(view_rect), "overflow": layout.overflow, "embedded_fonts": fonts, "installed_completions": doc.matching_font_completions(page, index, text, &style).map_err(failed)? })
             }
             "text_edit" if a.get("paragraph").is_some() => {
@@ -747,6 +751,7 @@ impl Automation {
                 let block = blocks.get(index).cloned().ok_or_else(|| ToolError::InvalidArgs(format!("paragraph {k} is out of range")))?;
                 let text = a.opt_str("text")?.map(str::to_owned).unwrap_or(block.text);
                 let mut style = pdfcraft_engine::BlockStyle {
+                    family: a.text_font()?,
                     ranges: parse_style_ranges(a.get("ranges"))?,
                     resource: a.opt_str("font_resource")?.map(str::to_owned),
                     bold: a.opt_bool("bold")?,
@@ -761,15 +766,6 @@ impl Automation {
                 let (dx, dy) = (a.opt_num("dx")?, a.opt_num("dy")?);
                 if dx.is_some() || dy.is_some() {
                     style.offset = Some([dx.unwrap_or(0.0), dy.unwrap_or(0.0)]);
-                }
-                if let Some(f) = a.opt_str("font")? {
-                    let family = match f {
-                        "helvetica" => pdfcraft_engine::FontFamily::Helvetica,
-                        "times" => pdfcraft_engine::FontFamily::Times,
-                        "courier" => pdfcraft_engine::FontFamily::Courier,
-                        other => return Err(ToolError::InvalidArgs(format!("unknown font {other:?} (helvetica, times, courier)"))),
-                    };
-                    style.family = Some((family, a.opt_bool("bold")?.unwrap_or(false), a.opt_bool("italic")?.unwrap_or(false)));
                 }
                 if let Some(c) = a.opt_str("color")? {
                     style.color = Some(comments::parse_color(c)?);
@@ -790,6 +786,7 @@ impl Automation {
                 let mut out = self.apply(&a, Edit::EditTextBlock { page, block: index, text, style })?;
                 let doc = self.doc(&a)?;
                 out["installed_completions"] = json!(doc.installed_completions);
+                out["ocr"] = json!(block.invisible);
                 let after = doc.text_blocks(page);
                 // Without `text` the paragraph keeps the document's own words: not echoed when
                 // the document doesn't allow copying them.
@@ -801,7 +798,7 @@ impl Automation {
                 let edited = block_overlapping(&after, moved)
                     .filter(|&i| !wanted.is_empty() && after.get(i).is_some_and(|b| b.text.split_whitespace().collect::<String>() == wanted));
                 if let Some(b) = edited.and_then(|i| after.get(i)) {
-                    out["paragraph"] = json!({ "lines": b.lines.len(), "font": b.base_font });
+                    out["paragraph"] = json!({ "lines": b.lines.len(), "font": b.base_font, "ocr": block.invisible });
                     if copy {
                         out["paragraph"]["text"] = json!(b.text);
                     }
@@ -2446,17 +2443,7 @@ fn parse_style_ranges(value: Option<&Value>) -> Result<Vec<pdfcraft_engine::Rang
                 .and_then(Value::as_u64)
                 .and_then(|n| usize::try_from(n).ok())
                 .ok_or_else(|| Args::wrong("range", "nonnegative byte offsets"))?;
-            let family = a
-                .opt_str("font")?
-                .map(|f| match f {
-                    "helvetica" => Ok(pdfcraft_engine::FontFamily::Helvetica),
-                    "times" => Ok(pdfcraft_engine::FontFamily::Times),
-                    "courier" => Ok(pdfcraft_engine::FontFamily::Courier),
-                    _ => Err(Args::wrong("font", "helvetica, times or courier")),
-                })
-                .transpose()?
-                .map(|f| -> Result<_> { Ok((f, a.opt_bool("bold")?.unwrap_or(false), a.opt_bool("italic")?.unwrap_or(false))) })
-                .transpose()?;
+            let family = a.text_font()?;
             Ok(pdfcraft_engine::RangeStyle {
                 range: start..end,
                 family,
@@ -2501,6 +2488,20 @@ impl Args<'_> {
     }
     fn opt_bool(&self, key: &str) -> Result<Option<bool>> {
         self.get(key).map(|v| v.as_bool().ok_or_else(|| Self::wrong(key, "true or false"))).transpose()
+    }
+    /// Standard family selection shared by committed and measured text drafts.
+    fn text_font(&self) -> Result<Option<(pdfcraft_engine::FontFamily, bool, bool)>> {
+        self.opt_str("font")?
+            .map(|font| {
+                let family = match font {
+                    "helvetica" => pdfcraft_engine::FontFamily::Helvetica,
+                    "times" => pdfcraft_engine::FontFamily::Times,
+                    "courier" => pdfcraft_engine::FontFamily::Courier,
+                    _ => return Err(Self::wrong("font", "helvetica, times or courier")),
+                };
+                Ok((family, self.opt_bool("bold")?.unwrap_or(false), self.opt_bool("italic")?.unwrap_or(false)))
+            })
+            .transpose()
     }
     /// What lets a selected font into the PDF: `installed: true` opts in to installed fonts.
     fn font_grant(&self) -> Result<pdfcraft_engine::FontGrant> {
