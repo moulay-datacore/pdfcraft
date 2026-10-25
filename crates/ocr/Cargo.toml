@@ -13,5 +13,15 @@ workspace = true
 [dependencies]
 pdfcraft-fonts = { workspace = true }
 ocrs = { version = "0.13.1", default-features = false, features = ["rten"] }
-rten = { version = "0.26.0", default-features = false, features = ["rten_format"] }
+# `onnx_format` loads the PP-OCR recognition model as PaddlePaddle publishes it (an ONNX file),
+# unchanged; `rten_format` loads ocrs's models.
+rten = { version = "0.26.0", default-features = false, features = ["rten_format", "onnx_format"] }
+# The same versions ocrs uses, so its detection boxes and tensors are these crates' types.
+rten-imageproc = "0.26.0"
+rten-tensor = "0.26.0"
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+# Renders the synthetic accented pages the model-gated tests read (L3, below this crate).
+pdfcraft-render = { workspace = true }

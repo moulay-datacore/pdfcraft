@@ -1,0 +1,343 @@
+//! The recognizer end to end with fake models (no model files needed), and model loading with
+//! small ONNX models built here.
+
+use super::frame::tests::word;
+use super::*;
+
+/// "x", "y" and the space: classes 1, 2 and 3 (0 is the blank).
+fn charset() -> Charset {
+    Charset::from_dict("x\ny\n").unwrap()
+}
+
+/// A model that "reads" ink: at each time step whose crop columns are dark in the middle rows
+/// it emits "x", elsewhere a space, so each blob of ink comes out as a word "x".
+struct InkReader;
+
+impl LineModel for InkReader {
+    fn run(&self, input: NdTensor<f32, 4>) -> Result<Output, String> {
+        let [n, _, h, w] = input.shape();
+        let steps = w / 8;
+        let mut data = Vec::with_capacity(n * steps * 4);
+        for b in 0..n {
+            for t in 0..steps {
+                let (mut sum, mut count) = (0.0, 0.0);
+                for y in h / 3..h * 2 / 3 {
+                    for x in t * 8..t * 8 + 8 {
+                        sum += input[[b, 0, y, x]];
+                        count += 1.0;
+                    }
+                }
+                let class = if sum / count < 0.3 { 1 } else { 3 };
+                data.extend((0..4).map(|k| if k == class { 0.9 } else { 0.1 / 3.0 }));
+            }
+        }
+        Ok(Output { shape: [n, steps, 4], data })
+    }
+}
+
+/// A model that returns `shape`, whatever it is given.
+struct Fixed([usize; 3]);
+
+impl LineModel for Fixed {
+    fn run(&self, _: NdTensor<f32, 4>) -> Result<Output, String> {
+        let [n, t, c] = self.0;
+        Ok(Output { shape: self.0, data: vec![0.0; n * t * c] })
+    }
+}
+
+fn reader() -> Recognizer {
+    Recognizer::with_model(Box::new(InkReader), charset()).unwrap()
+}
+
+/// A white page with black parallelograms (`x0..x1`, 20 px tall, centred on a line through
+/// (0, `y0`) going down `deg` degrees to the right).
+fn page(w: usize, h: usize, y0: f32, deg: f32, blobs: &[(usize, usize)]) -> Vec<u8> {
+    let mut px = vec![255u8; w * h];
+    let slope = deg.to_radians().tan();
+    for &(x0, x1) in blobs {
+        for x in x0..x1 {
+            let yc = y0 + x as f32 * slope;
+            for y in 0..h {
+                if (y as f32 + 0.5 - yc).abs() < 10.0 {
+                    px[y * w + x] = 0;
+                }
+            }
+        }
+    }
+    px
+}
+
+/// A detection box around blob `x0..x1` on that line, 3 px bigger all round as ocrs makes them.
+fn detected(x0: usize, x1: usize, y0: f32, deg: f32) -> RotatedRect {
+    let cx = (x0 + x1) as f32 / 2.0;
+    word(cx, y0 + cx * deg.to_radians().tan(), (x1 - x0) as f32 + 6.0, 26.0, deg)
+}
+
+#[test]
+fn words_come_back_where_their_ink_is_and_follow_the_skew() {
+    let (w, h, y0, deg) = (900, 200, 60.0, 2.0);
+    let blobs = [(60, 200), (240, 300), (340, 520), (560, 700), (740, 840)];
+    let px = page(w, h, y0, deg, &blobs);
+    let img = Gray::new(&px, w, h).unwrap();
+    let line: Vec<RotatedRect> = blobs.iter().map(|&(a, b)| detected(a, b, y0, deg)).collect();
+    let lines = reader().recognize(&img, &[line]).unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let words = &lines[0].words;
+    assert_eq!(words.len(), blobs.len(), "{words:?}");
+    for (wd, &(a, b)) in words.iter().zip(&blobs) {
+        assert_eq!(wd.text, "x");
+        assert!(wd.snapped, "{wd:?}");
+        // Snapped to its detection box: centred on the blob, as wide as the box.
+        let [cx, cy] = centre(&wd.quad);
+        let mid = (a + b) as f32 / 2.0;
+        assert!((cx - mid).abs() < 3.0 && (cy - (y0 + mid * deg.to_radians().tan())).abs() < 3.0, "{wd:?} vs blob {a}..{b}");
+        let [tl, tr, br, bl] = wd.quad;
+        let angle = (tr[1] - tl[1]).atan2(tr[0] - tl[0]).to_degrees();
+        assert!((angle - deg).abs() < 0.1, "{angle}° for {wd:?}");
+        assert!(((br[1] - bl[1]).atan2(br[0] - bl[0]).to_degrees() - deg).abs() < 0.1);
+        let width = (tr[0] - tl[0]).hypot(tr[1] - tl[1]);
+        assert!((width - ((b - a) as f32 + 6.0)).abs() < 1.0, "{width} for {a}..{b}");
+    }
+}
+
+/// The verifier's defect: ocrs split a text line in two, the small "à" between the halves had
+/// no detection box of its own, and both halves' crops (each with its margin) read it, so the
+/// text layer said "à à Châlons". The same ink read twice is kept once.
+#[test]
+fn a_word_in_the_overlap_of_two_crops_is_read_once() {
+    let (w, h, y0) = (600, 120, 60.0);
+    // A word, a small mark with no box, a word: ocrs gives the two words as separate lines.
+    let blobs = [(50, 150), (164, 174), (183, 283)];
+    let px = page(w, h, y0, 0.0, &blobs);
+    let img = Gray::new(&px, w, h).unwrap();
+    let lines = [vec![detected(50, 150, y0, 0.0)], vec![detected(183, 283, y0, 0.0)]];
+    let rec = reader();
+    // Both crops take in the mark.
+    let crops = rec.crops(&img, &lines);
+    let covers = |c: &Crop, x: f32| (c.frame.point(0.0, 0.0)[0]..c.frame.point(c.frame.length, 0.0)[0]).contains(&x);
+    assert!(crops.len() == 2 && crops.iter().all(|c| covers(c, 169.0)));
+    let read = rec.recognize(&img, &lines).unwrap();
+    let on_mark = |l: &[RecLine]| l.iter().flat_map(|l| &l.words).filter(|wd| (centre(&wd.quad)[0] - 169.0).abs() < 8.0).count();
+    assert_eq!(on_mark(&read), 1, "{read:?}");
+    // Every blob is read, the words keep their order, and the words with boxes kept theirs.
+    let xs: Vec<f32> = read.iter().flat_map(|l| &l.words).map(|wd| centre(&wd.quad)[0]).collect();
+    assert_eq!(xs.len(), 3, "{read:?}");
+    assert!(xs.windows(2).all(|p| p[0] < p[1]), "{xs:?}");
+    assert!(read.iter().flat_map(|l| &l.words).filter(|wd| wd.snapped).count() == 2);
+}
+
+/// The defect the French end-to-end test showed at 0°: ocrs made "; año," a line of its own,
+/// lying inside the line it is part of, and it came out after that line. A fragment joins its
+/// line, in order along it; the line below stays apart.
+#[test]
+fn a_fragment_inside_a_line_joins_it() {
+    let (w, h, y0) = (500, 140, 50.0);
+    let mut px = page(w, h, y0, 0.0, &[(50, 150), (160, 190), (200, 300)]);
+    for (p, b) in px.iter_mut().zip(page(w, h, y0 + 40.0, 0.0, &[(50, 150)])) {
+        *p = (*p).min(b);
+    }
+    let img = Gray::new(&px, w, h).unwrap();
+    let lines =
+        [vec![detected(50, 150, y0, 0.0), detected(200, 300, y0, 0.0)], vec![detected(160, 190, y0, 0.0)], vec![detected(50, 150, y0 + 40.0, 0.0)]];
+    let read = reader().recognize(&img, &lines).unwrap();
+    assert_eq!(read.len(), 2, "{read:?}");
+    let xs: Vec<f32> = read[0].words.iter().map(|wd| centre(&wd.quad)[0]).collect();
+    assert_eq!(xs.len(), 3, "{read:?}");
+    assert!(xs.windows(2).all(|p| p[0] < p[1]) && (xs[1] - 175.0).abs() < 3.0, "{xs:?}");
+    assert!(read[0].words.iter().all(|wd| wd.snapped && (centre(&wd.quad)[1] - y0).abs() < 3.0), "{read:?}");
+    assert_eq!(read[1].words.len(), 1, "{read:?}");
+    assert!((centre(&read[1].words[0].quad)[1] - (y0 + 40.0)).abs() < 3.0, "{read:?}");
+    assert!(merge_fragments(Vec::new()).is_empty());
+}
+
+#[test]
+fn dedupe_prefers_the_snapped_then_the_confident_word() {
+    let q = |x: f32| [[x, 0.0], [x + 10.0, 0.0], [x + 10.0, 10.0], [x, 10.0]];
+    let wd = |x: f32, snapped: bool, confidence: f32, text: &str| RecWord { text: text.into(), quad: q(x), confidence, snapped };
+    let frame = LineFrame::of_line(&[word(50.0, 5.0, 100.0, 10.0, 0.0)], Margins::default()).unwrap();
+    let line = |words: Vec<RecWord>| RecLine { words, confidence: 0.9, frame: frame.clone() };
+    let mut lines =
+        vec![line(vec![wd(0.0, false, 0.99, "a"), wd(20.0, true, 0.6, "b")]), line(vec![wd(1.0, true, 0.7, "à"), wd(21.0, false, 0.6, "b")])];
+    dedupe(&mut lines);
+    let texts: Vec<Vec<&str>> = lines.iter().map(|l| l.words.iter().map(|w| w.text.as_str()).collect()).collect();
+    assert_eq!(texts, [vec!["b"], vec!["à"]]);
+    // Equal: the first stays. A line left empty goes; words that merely touch both stay.
+    let mut lines = vec![line(vec![wd(0.0, false, 0.8, "a")]), line(vec![wd(2.0, false, 0.8, "a"), wd(9.0, false, 0.8, "c")])];
+    dedupe(&mut lines);
+    assert_eq!(lines.len(), 2);
+    assert_eq!((lines[0].words.len(), lines[1].words[0].text.as_str()), (1, "c"));
+    let mut lines = vec![line(vec![wd(0.0, false, 0.8, "a")]), line(vec![wd(0.0, false, 0.9, "a")])];
+    dedupe(&mut lines);
+    assert_eq!((lines.len(), lines[0].words[0].confidence), (1, 0.9));
+    // Degenerate quads overlap nothing.
+    let flat = [[0.0, 0.0]; 4];
+    assert_eq!(overlap(&flat, &q(0.0)), 0.0);
+    assert_eq!(overlap(&q(0.0), &[[f32::NAN, 0.0]; 4]), 0.0);
+}
+
+/// A page's crops are capped: lines without end (or very many) stop being cut out once the
+/// page's crop pixels run out, rather than taking memory without bound.
+#[test]
+fn a_page_s_crops_are_capped() {
+    let px = [255u8; 100];
+    let img = Gray::new(&px, 10, 10).unwrap();
+    let lines: Vec<Vec<RotatedRect>> = (0..80).map(|i| vec![word(5.0, i as f32 * 4.0, 1e9, 2.0, 0.0)]).collect();
+    let crops = reader().crops(&img, &lines);
+    assert!(crops.iter().all(|c| c.width == frame::MAX_WIDTH));
+    assert_eq!(crops.len(), MAX_PAGE_PIXELS / (frame::MAX_WIDTH * REC_HEIGHT));
+}
+
+#[test]
+fn batch_outputs_are_checked() {
+    let px = page(400, 100, 50.0, 0.0, &[(50, 150), (200, 300)]);
+    let img = Gray::new(&px, 400, 100).unwrap();
+    let lines = [vec![detected(50, 150, 50.0, 0.0)], vec![detected(200, 300, 50.0, 0.0)]];
+    // Probed with one line, the model passes; given two, it still answers for one.
+    let rec = Recognizer::with_model(Box::new(Fixed([1, 40, 4])), charset()).unwrap();
+    assert!(rec.recognize(&img, &lines).unwrap_err().contains("for 2 lines"));
+    // The wrong class count, no steps, more steps than pixels, or a short output fail the probe.
+    for shape in [[1, 40, 5], [1, 0, 4], [1, 400, 4], [2, 40, 4]] {
+        assert!(Recognizer::with_model(Box::new(Fixed(shape)), charset()).is_err(), "{shape:?}");
+    }
+    struct Short;
+    impl LineModel for Short {
+        fn run(&self, _: NdTensor<f32, 4>) -> Result<Output, String> {
+            Ok(Output { shape: [1, 40, 4], data: vec![0.0; 10] })
+        }
+    }
+    let rec = Recognizer { model: Box::new(Short), charset: charset() };
+    assert!(rec.recognize(&img, &lines[..1]).is_err());
+    // No lines, no crops, no run.
+    assert!(rec.recognize(&img, &[]).unwrap().is_empty());
+}
+
+/// A minimal ONNX model, encoded here: input `x` and output `y` declared with the given
+/// dimensions (a number is fixed, a name is free), `y` being a constant of zeros shaped
+/// `constant` (rten infers the output's shape from it).
+mod onnx {
+    fn varint(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    fn int(field: u64, v: u64, out: &mut Vec<u8>) {
+        varint(field << 3, out);
+        varint(v, out);
+    }
+    fn bytes(field: u64, b: &[u8], out: &mut Vec<u8>) {
+        varint(field << 3 | 2, out);
+        varint(b.len() as u64, out);
+        out.extend_from_slice(b);
+    }
+    fn value_info(name: &str, dims: &[&str]) -> Vec<u8> {
+        let mut shape = Vec::new();
+        for d in dims {
+            let mut dim = Vec::new();
+            match d.parse::<u64>() {
+                Ok(n) => int(1, n, &mut dim),
+                Err(_) => bytes(2, d.as_bytes(), &mut dim),
+            }
+            bytes(1, &dim, &mut shape);
+        }
+        let mut tensor = Vec::new();
+        int(1, 1, &mut tensor); // FLOAT
+        bytes(2, &shape, &mut tensor);
+        let mut ty = Vec::new();
+        bytes(1, &tensor, &mut ty);
+        let mut vi = Vec::new();
+        bytes(1, name.as_bytes(), &mut vi);
+        bytes(2, &ty, &mut vi);
+        vi
+    }
+    pub fn model(input: &[&str], output: &[&str], constant: &[u64]) -> Vec<u8> {
+        let mut init = Vec::new();
+        for d in constant {
+            int(1, *d, &mut init);
+        }
+        int(2, 1, &mut init); // FLOAT
+        bytes(8, b"c", &mut init);
+        bytes(9, &vec![0u8; 4 * constant.iter().product::<u64>() as usize], &mut init);
+        let mut node = Vec::new();
+        bytes(1, b"c", &mut node);
+        bytes(2, b"y", &mut node);
+        bytes(4, b"Identity", &mut node);
+        let mut graph = Vec::new();
+        bytes(1, &node, &mut graph);
+        bytes(2, b"g", &mut graph);
+        bytes(5, &init, &mut graph);
+        bytes(11, &value_info("x", input), &mut graph);
+        bytes(12, &value_info("y", output), &mut graph);
+        let mut opset = Vec::new();
+        bytes(1, b"", &mut opset);
+        int(2, 11, &mut opset);
+        let mut m = Vec::new();
+        int(1, 7, &mut m);
+        bytes(7, &graph, &mut m);
+        bytes(8, &opset, &mut m);
+        m
+    }
+}
+
+/// A model that doesn't fit the contract or its dictionary is refused when it is loaded, with
+/// a message that says why, rather than failing (or misreading) on every page.
+#[test]
+fn models_are_checked_against_the_contract_and_the_dictionary() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-models-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dict = dir.join("dict.txt");
+    std::fs::write(&dict, "x\ny\n").unwrap();
+    let load = |name: &str, bytes: &[u8]| {
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        Recognizer::load(&p, &dict).err()
+    };
+    let good = ["N", "3", "48", "W"];
+    let out = ["N", "T", "C"];
+    assert_eq!(load("good.onnx", &onnx::model(&good, &out, &[1, 40, 4])), None);
+    for (name, model, why) in [
+        ("grey.onnx", onnx::model(&["N", "1", "48", "W"], &out, &[1, 40, 4]), "1 colour channels"),
+        ("tall.onnx", onnx::model(&["N", "3", "32", "W"], &out, &[1, 40, 4]), "32 pixels high"),
+        ("flat.onnx", onnx::model(&["N", "3", "W"], &out, &[1, 40, 4]), "input has 3 dimensions"),
+        ("seq.onnx", onnx::model(&good, &["T", "C"], &[40, 4]), "output has 2 dimensions"),
+        ("classes.onnx", onnx::model(&good, &out, &[1, 40, 7]), "7 classes"),
+        ("junk.onnx", b"not a model at all".to_vec(), "junk.onnx"),
+        ("empty.onnx", Vec::new(), "empty.onnx"),
+    ] {
+        let err = load(name, &model).unwrap_or_else(|| panic!("{name} loaded"));
+        assert!(err.contains(why) && err.contains(name), "{name}: {err}");
+    }
+    // A dictionary that isn't one is refused before the model is read.
+    std::fs::write(&dict, "xy\n").unwrap();
+    assert!(load("good2.onnx", &onnx::model(&good, &out, &[1, 40, 4])).unwrap().contains("dict.txt"));
+    assert!(Recognizer::load(&dir.join("missing.onnx"), &dir.join("missing.txt")).is_err());
+    // Files over the cap are refused unread.
+    let p = dir.join("big.bin");
+    std::fs::write(&p, [0u8; 11]).unwrap();
+    assert!(read_capped(&p, 10).unwrap_err().contains("larger"));
+    assert_eq!(read_capped(&p, 11).unwrap().len(), 11);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A recognizer loaded from a real (tiny) ONNX file runs through rten end to end.
+#[test]
+fn a_loaded_model_reads_a_page() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (model, dict) = (dir.join("m.onnx"), dir.join("d.txt"));
+    std::fs::write(&model, onnx::model(&["N", "3", "48", "W"], &["N", "T", "C"], &[1, 40, 4])).unwrap();
+    // "ł" is not in WinAnsi, so the text layer couldn't hold it: it is never emitted.
+    std::fs::write(&dict, "x\nł\n").unwrap();
+    let rec = Recognizer::load(&model, &dict).unwrap();
+    assert_eq!(rec.allowed_chars().collect::<String>(), "x ");
+    let px = page(400, 100, 50.0, 0.0, &[(50, 150)]);
+    let img = Gray::new(&px, 400, 100).unwrap();
+    // The constant model reads blanks everywhere: nothing.
+    assert!(rec.recognize(&img, &[vec![detected(50, 150, 50.0, 0.0)]]).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -120,10 +120,10 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     group(ui, "Settings", &mut |ui| {
         egui::Grid::new("ocr-settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label(tl!("Document language"));
-            let name = LANGUAGES.iter().find(|l| l.0 == d.language).map_or("English", |l| l.1);
+            let name = LANGUAGES.iter().find(|l| l.code == d.language).map_or("English", |l| l.name);
             egui::ComboBox::from_id_salt("ocr-language").selected_text(tl!(name)).width(220.0).show_ui(ui, |ui| {
-                for (code, name) in LANGUAGES {
-                    ui.selectable_value(&mut d.language, (*code).to_string(), tl!(*name));
+                for l in LANGUAGES {
+                    ui.selectable_value(&mut d.language, l.code.to_string(), tl!(l.name));
                 }
             });
             ui.end_row();
