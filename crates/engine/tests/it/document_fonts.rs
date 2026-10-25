@@ -269,3 +269,24 @@ fn installed_metadata_catalogue_skips_changed_and_removed_programs() {
     assert!(session.get(id).unwrap().matching_font_completions(0, 0, "AB", &BlockStyle::default()).unwrap().is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn installed_font_lists_do_not_load_unedited_programs() {
+    use pdfcraft_engine::{FontGrant, text_fonts::Catalogue};
+    let dir = std::env::temp_dir().join(format!("pdfcraft-metadata-list-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("font.otf"), support::font_fixture::named_font("Rect Font", "RectFont-Regular", 0, true)).unwrap();
+    let mut session = Session::new();
+    let id = session.open("source.pdf", None, support::source_subset::source_subset(), None).unwrap();
+    let source = session.get(id).unwrap().text_editor_fonts(0);
+    let catalogue = Arc::new(Catalogue::discover(std::slice::from_ref(&dir), FontGrant::InstalledEmbeddable));
+    let list: Vec<_> = catalogue.files().cloned().collect();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].family, "Rect Font");
+    session.set_text_font_catalogue(catalogue);
+    let untouched = session.get(id).unwrap().text_editor_fonts(0);
+    assert_eq!(untouched.len(), source.len(), "opening the source-font list must not load matching programs before a paragraph needs them");
+    assert!(untouched.iter().all(|f| !f.resource.starts_with("PCApprovedInstalled")));
+    std::fs::remove_dir_all(dir).unwrap();
+}

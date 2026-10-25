@@ -28,8 +28,8 @@ pub enum FilePurpose {
     RedactWords,
 }
 
-/// Cache eligible installed faces off the GUI thread. Opening a document starts the scan;
-/// the same immutable bytes serve automatic subset completion and the optional picker.
+/// Cache eligible installed names and paths off the GUI thread. The catalogue and optional
+/// open-licence picker retain no font programs; matched paragraphs load bytes only on demand.
 #[cfg(not(target_arch = "wasm32"))]
 fn installed_font_catalogue(ctx: &egui::Context, installed: bool) -> Option<Arc<pdfcraft_engine::text_fonts::Catalogue>> {
     use std::sync::{Mutex, OnceLock};

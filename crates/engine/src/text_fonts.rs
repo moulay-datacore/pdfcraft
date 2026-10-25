@@ -299,23 +299,4 @@ impl Catalogue {
         let missing = pdfcraft_edit::text::missing_source_glyphs(cos, page, block, text, style)?;
         self.register_programs(cos, page, &self.matching_programs(&missing))
     }
-
-    pub(crate) fn preview_fonts(&self, programs: &mut Vec<pdfcraft_edit::text::TextEditorFont>) {
-        let faces: std::collections::BTreeSet<_> = programs.iter().map(|p| p.face.clone()).collect();
-        let mut budget = (32usize << 20).saturating_sub(programs.iter().fold(0usize, |sum, p| sum.saturating_add(p.bytes.len())));
-        for source in faces {
-            for (index, font) in self.fonts.iter().enumerate() {
-                let resource = format!("PCApprovedInstalled{index}");
-                if !pdfcraft_fonts::embedding::same_face_name(&font.file.face, &source)
-                    || font.stamp.size > budget as u64
-                    || programs.iter().any(|p| p.resource == resource)
-                {
-                    continue;
-                }
-                let Some(bytes) = self.load(font) else { continue };
-                budget = budget.saturating_sub(bytes.len());
-                programs.push(pdfcraft_edit::text::TextEditorFont { resource, face: source.clone(), bytes });
-            }
-        }
-    }
 }
