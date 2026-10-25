@@ -3381,6 +3381,32 @@ kind = "model"
 usage = "Scan & OCR: reads the words it finds (cargo xtask models)"
 sha256 = "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e"
 
+[[fetched]]
+file = "PP-OCRv6_small_rec.onnx"
+url = "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/b8f84f0b80c529de40b4fbb3544b84fa7233a513/inference.onnx"
+title = "PP-OCRv6 small text recognition model (ONNX)"
+author = "PaddlePaddle Authors (PaddleOCR)"
+source = "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx at commit b8f84f0b80c529de40b4fbb3544b84fa7233a513 (inference.onnx, PaddlePaddle's official ONNX export, shipped unmodified; model card: apache-2.0)"
+licence = "Apache-2.0"
+licence_url = "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/b03f46425e8ff4442b268ce449e3eef758146cd4/LICENSE"
+licence_sha256 = "3840c5c0c61c294264d2dd77b8777be6ddd90121ef4e0e64abcd22edea581d6e"
+kind = "model"
+usage = "Scan & OCR: reads French, German, Spanish, Italian, Portuguese and Dutch, accents included, in the words found (cargo xtask models)"
+sha256 = "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634"
+
+[[fetched]]
+file = "ppocrv6_dict.txt"
+url = "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/b03f46425e8ff4442b268ce449e3eef758146cd4/ppocr/utils/dict/ppocrv6_dict.txt"
+title = "PP-OCRv6 character dictionary"
+author = "PaddlePaddle Authors (PaddleOCR)"
+source = "https://github.com/PaddlePaddle/PaddleOCR at tag v3.7.0, commit b03f46425e8ff4442b268ce449e3eef758146cd4 (ppocr/utils/dict/ppocrv6_dict.txt, unmodified: the 18 708 characters of the model's output classes)"
+licence = "Apache-2.0"
+licence_url = "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/b03f46425e8ff4442b268ce449e3eef758146cd4/LICENSE"
+licence_sha256 = "3840c5c0c61c294264d2dd77b8777be6ddd90121ef4e0e64abcd22edea581d6e"
+kind = "model"
+usage = "Scan & OCR: the characters the PP-OCRv6 recognition model reads (cargo xtask models)"
+sha256 = "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d"
+
 [[build_input]]
 name = "craft-fonts"
 option = "CRAFT_FONTS_DIR"

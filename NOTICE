@@ -36,6 +36,14 @@ list (author, source, license) is in ATTRIBUTION.md.
 - egui default fonts (epaint_default_fonts, via eframe) — Ubuntu Light (Ubuntu Font Licence 1.0),
   Hack (MIT / Bitstream Vera licence), Noto Emoji (SIL OFL 1.1), emoji-icon-font (MIT).
 - Colour profile in hayro-interpret — CGATS001Compat-v2-micro.icc (CC0-1.0, Clinton Ingram).
+- OCR models, in the release packages only (fetched by `cargo xtask models`, verified by SHA-256,
+  never committed). Each ships beside the app with its licence (<file>.LICENCE.txt) and an
+  ATTRIBUTION.txt crediting it:
+  - the ocrs text detection and recognition models (text-detection.rten, text-recognition.rten) by
+    Robert Knight, trained on HierText — CC-BY-SA-4.0;
+  - the PaddleOCR PP-OCRv6 small recognition model and its character dictionary
+    (PP-OCRv6_small_rec.onnx, ppocrv6_dict.txt), Copyright (c) 2016 PaddlePaddle Authors —
+    Apache-2.0, unmodified. PaddleOCR has no NOTICE file of its own.
 
 Required notices:
 
