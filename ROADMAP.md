@@ -1,5 +1,7 @@
 # PdfCraft roadmap
 
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (M7, #2750: Single-style Keep source fonts edits retain source glyphs and batch only missing glyphs in fallback fonts. Per-rewrite character eligibility and widths are cached; source and fallback edge spaces stay extractable. Estimates unchanged.)
+
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
 > **Last reviewed:** 2026-10-23 | **Last updated:** 2026-10-23 | **Change:** minor (M8, #3205 follow-up: labelled Italian international phone numbers with a slash match whole; estimates unchanged)
@@ -198,6 +200,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- **2026-10-25 (M7, #2750):** Single-style Keep source fonts edits retain source glyphs and batch only missing glyphs in fallback fonts. Per-rewrite character eligibility and widths are cached; source and fallback edge spaces stay extractable. Estimates unchanged.
 
 - **2026-10-24 (M14, #4253):** The annotation quick bar remembers Keep tool selected across restarts, including unpinning. Old and malformed settings keep safe defaults; the opt-in UI control channel reads and changes the same preference. Estimates unchanged.
 
