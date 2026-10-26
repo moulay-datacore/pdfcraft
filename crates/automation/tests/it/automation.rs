@@ -6402,6 +6402,45 @@ fn ocr_recognize_reads_french_and_replaces_its_own_text() {
     assert_eq!(ok(&mut a, "edit_undo", json!({ "doc": scan }))["undone"], "Recognize text");
 }
 
+/// The reviewer's gap: no test saw a fallback reach a tool result. With the English models and
+/// no accented-Latin one, French is read as English and every OCR tool says so: language,
+/// fell_back_from and fallback_reason; replacing keeps the earlier text (skip_kind
+/// kept_earlier_text) rather than lose its accents (needs exactly those models; skipped
+/// otherwise).
+#[test]
+fn ocr_tools_say_when_they_read_a_language_as_english() {
+    let dir = workdir("ocr-fallback");
+    let mut a = auto(&dir);
+    let status = ok(&mut a, "ocr_status", json!({}));
+    if status["languages"][1]["state"] != "falls_back_to_english" {
+        eprintln!("skipped: needs the English models without the accented-Latin one");
+        return;
+    }
+    let text = ok(&mut a, "doc_create", json!({ "from": "text", "text": "Read as English instead" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_images", json!({ "doc": text, "folder": "scan", "dpi": 200, "pages": [1] }));
+    let png = std::fs::read_dir(dir.join("scan")).unwrap().next().unwrap().unwrap().path();
+    let scan = ok(&mut a, "doc_create", json!({ "from": "images", "paths": [png.to_string_lossy()] }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_save", json!({ "doc": scan, "path": "scan.pdf" }));
+    let fell_back = |r: &Value| {
+        assert_eq!((&r["language"], &r["fell_back_from"]), (&json!("en"), &json!("fr")), "{r}");
+        assert!(r["fallback_reason"].as_str().unwrap().contains("French recognition model isn't installed"), "{r}");
+    };
+
+    let r = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "fr" }));
+    fell_back(&r);
+    assert!(r["words"].as_u64().unwrap() >= 3, "read, as English: {r}");
+    let again = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "fr", "replace_ocr": true }));
+    fell_back(&again);
+    assert_eq!((&again["replaced_pages"], &again["pages"][0]["skip_kind"]), (&json!(0), &json!("kept_earlier_text")), "{again}");
+    let skipped = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "en" }));
+    assert_eq!((&skipped["fell_back_from"], &skipped["pages"][0]["skip_kind"]), (&json!(null), &json!("has_text")), "{skipped}");
+
+    let files = ok(&mut a, "ocr_recognize_files", json!({ "paths": ["scan.pdf"], "folder": "out-files", "language": "fr" }));
+    fell_back(&files["files"][0]);
+    let batch = ok(&mut a, "doc_batch", json!({ "paths": ["scan.pdf"], "steps": ["ocr"], "language": "fr", "out_dir": "out-batch" }));
+    fell_back(&batch["files"][0]["steps"][0]);
+}
+
 /// #1028: `skip_text_pages: false` reads a picture on a page that has its own text, and the
 /// page's own words are left out (counted) instead of being added a second time.
 #[test]
