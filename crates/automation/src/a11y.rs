@@ -947,6 +947,9 @@ impl Automation {
                 .collect::<Result<Vec<_>>>()?;
             Action { name: "Custom".into(), description: String::new(), steps, builtin: false }
         };
+        // The language a recognize_text step reads each file in: refused up front when text
+        // recognition doesn't read it, like ocr_recognize; else the file's own, else English.
+        let language = a.opt_str("language")?.map(|l| pdfcraft_engine::ocr::resolve_language(l).map_err(ToolError::InvalidArgs)).transpose()?;
         let folder = self.resolve(a.str("folder")?, true)?;
         std::fs::create_dir_all(&folder).map_err(|e| failed(e.to_string()))?;
         let mut out = Vec::new();
@@ -955,7 +958,11 @@ impl Automation {
             let result =
                 self.resolve(p, false).map_err(|e| e.to_string()).and_then(|src| crate::read_input_bytes(&src).map_err(|e| e.to_string())).and_then(
                     |bytes| {
-                        let ocr = pdfcraft_engine::actions::OcrLanguage { models: self.session.ocr_models(), ..Default::default() };
+                        let ocr = pdfcraft_engine::actions::OcrLanguage {
+                            pick: language.map(|l| l.code),
+                            models: self.session.ocr_models(),
+                            ..Default::default()
+                        };
                         run_on(&action, &name, std::sync::Arc::new(bytes), ocr, |_, _| {})
                     },
                 );
@@ -973,7 +980,11 @@ impl Automation {
                         return Err(failed(format!("{}: no unused output name available", target.display())));
                     }
                     write_atomic(&target, &r.bytes)?;
-                    json!({ "path": p, "output": target.to_string_lossy(), "log": r.log })
+                    let mut file = json!({ "path": p, "output": target.to_string_lossy(), "log": r.log });
+                    if let Some(read) = r.ocr_language {
+                        read_as(&mut file, read, r.ocr_fallback.as_ref());
+                    }
+                    file
                 }
                 Err(e) => json!({ "path": p, "error": e }),
             });

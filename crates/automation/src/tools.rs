@@ -1191,7 +1191,7 @@ pub fn tools() -> Vec<ToolDef> {
             .ro()
             .cmd("actions.wizard")
             .with(schema(json!({}), &[])),
-        t("action_run", "Run an action", "Action Wizard: run a built-in action (action: its name) or a list of steps ([{step, arg}], ids from action_list) on each PDF in paths, writing the results into folder under the same names. Returns each file's step log or error.")
+        t("action_run", "Run an action", "Action Wizard: run a built-in action (action: its name) or a list of steps ([{step, arg}], ids from action_list) on each PDF in paths, writing the results into folder under the same names. A recognize_text step reads each file in language (default: the file's own, its /Lang, else en), as ocr_recognize does. Returns each file's step log or error; a file that went through a recognize_text step also has the language its text was read as and, when it fell back to English, the one asked for and why (language, fell_back_from, fallback_reason, as in ocr_recognize).")
             .cmd("actions.wizard")
             .with(schema(
                 json!({
@@ -1199,6 +1199,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "steps": { "type": "array", "items": { "type": "object", "properties": { "step": { "type": "string" }, "arg": { "type": "string" } }, "required": ["step"] } },
                     "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
                     "folder": { "type": "string" },
+                    "language": ocr_language(),
                 }),
                 &["paths", "folder"],
             )),

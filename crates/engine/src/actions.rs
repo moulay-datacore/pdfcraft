@@ -144,6 +144,9 @@ pub struct FileResult {
     pub bytes: Arc<Vec<u8>>,
     /// One line per step.
     pub log: Vec<String>,
+    /// The language a Recognize text step read the file as (English when it fell back), if the
+    /// action has one.
+    pub ocr_language: Option<&'static crate::ocr::Language>,
     /// Set when the Recognize text step read the file as English instead of its language, and
     /// why, so the caller can say so (never silently).
     pub ocr_fallback: Option<crate::ocr::Fallback>,
@@ -167,7 +170,7 @@ fn apply_step(
     step: &Step,
     ocr: OcrLanguage<'_>,
     log: &mut Vec<String>,
-    fallback: &mut Option<crate::ocr::Fallback>,
+    (read_as, fallback): (&mut Option<&'static crate::ocr::Language>, &mut Option<crate::ocr::Fallback>),
 ) -> Result<Option<DocId>, EditError> {
     let pages = s.get(id).map_or(0, |d| d.info.pages.len());
     let all: Vec<usize> = (0..pages).collect();
@@ -181,7 +184,11 @@ fn apply_step(
                 line.push_str(&format!(" (read as English instead of {})", f.from.name));
             }
             log.push(line);
-            *fallback = fallback.take().or(found.fallback);
+            // The first Recognize text step's reading stands for the file, as its log line comes first.
+            if read_as.is_none() {
+                *read_as = Some(found.language);
+                *fallback = found.fallback;
+            }
             return Ok(None);
         }
         Step::ReduceFileSize => {
@@ -250,15 +257,16 @@ pub fn run_on(
     if let Some(why) = s.get(id).and_then(|d| d.read_only_reason.clone()) {
         return Err(why);
     }
-    let (mut log, mut ocr_fallback) = (Vec::new(), None);
+    let (mut log, mut ocr_language, mut ocr_fallback) = (Vec::new(), None, None);
     for (i, step) in action.steps.iter().enumerate() {
         progress(i, action.steps.len());
-        if let Some(new) = apply_step(&mut s, id, step, ocr, &mut log, &mut ocr_fallback).map_err(|e| format!("{}: {e}", step.label()))? {
+        let read = (&mut ocr_language, &mut ocr_fallback);
+        if let Some(new) = apply_step(&mut s, id, step, ocr, &mut log, read).map_err(|e| format!("{}: {e}", step.label()))? {
             id = new;
         }
     }
     let d = s.get(id).ok_or("the document was lost")?;
     // A signed file keeps its signatures: incremental. Otherwise a clean full rewrite.
     let bytes = if d.is_signed() { s.save_bytes(id) } else { s.save_full_bytes(id) }.map_err(|e| e.to_string())?;
-    Ok(FileResult { name: name.to_string(), bytes, log, ocr_fallback })
+    Ok(FileResult { name: name.to_string(), bytes, log, ocr_language, ocr_fallback })
 }

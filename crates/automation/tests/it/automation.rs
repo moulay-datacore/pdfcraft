@@ -6387,6 +6387,27 @@ fn ocr_recognize_reads_french_and_replaces_its_own_text() {
     ok(&mut a, "doc_export_images", json!({ "doc": text, "folder": "scan", "dpi": 200, "pages": [1] }));
     let png = std::fs::read_dir(dir.join("scan")).unwrap().next().unwrap().unwrap().path();
     let scan = ok(&mut a, "doc_create", json!({ "from": "images", "paths": [png.to_string_lossy()] }))["doc"].as_u64().unwrap();
+    // The reviewer's gap: action_run couldn't choose the language, so a French scan without
+    // /Lang lost its accents headless while the desktop Action Wizard kept them.
+    ok(&mut a, "doc_save", json!({ "doc": scan, "path": "scan.pdf" }));
+    let action = |a: &mut Automation, args: Value| {
+        let r = ok(a, "action_run", args);
+        let out = ok(a, "doc_open", json!({ "path": r["files"][0]["output"] }))["doc"].as_u64().unwrap();
+        let text = ok(a, "text_extract", json!({ "doc": out }))["pages"][0]["text"].as_str().unwrap_or_default().to_string();
+        (r["files"][0].clone(), text)
+    };
+    let (file, text) = action(&mut a, json!({ "action": "Optimize Scanned Documents", "paths": ["scan.pdf"], "folder": "act-fr", "language": "fr" }));
+    assert_eq!((&file["language"], &file["fell_back_from"]), (&json!("fr"), &json!(null)), "{file}");
+    assert!(text.contains("médecin"), "{text:?}");
+    let (file, text) = action(&mut a, json!({ "action": "Optimize Scanned Documents", "paths": ["scan.pdf"], "folder": "act-default" }));
+    assert_eq!(file["language"], "en", "without language, the file's own, else English: {file}");
+    assert!(!text.contains("médecin"), "{text:?}");
+    let (file, _) = action(&mut a, json!({ "action": "Add Page Numbers", "paths": ["scan.pdf"], "folder": "act-none", "language": "fr" }));
+    assert!(file.get("language").is_none(), "no recognize_text step, no language: {file}");
+    let r = a.call("action_run", &json!({ "action": "Optimize Scanned Documents", "paths": ["scan.pdf"], "folder": "act-pl", "language": "pl" }));
+    assert!(matches!(r, Err(ToolError::InvalidArgs(_))), "{r:?}");
+    assert!(!dir.join("act-pl").exists(), "refused before anything is written");
+
     let r = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "fr" }));
     assert_eq!((&r["language"], &r["fell_back_from"], &r["replaced_pages"]), (&json!("fr"), &json!(null), &json!(0)), "{r}");
     let read = r["pages"][0]["text"].as_str().unwrap();
@@ -6441,6 +6462,9 @@ fn ocr_tools_say_when_they_read_a_language_as_english() {
     fell_back(&files["files"][0]);
     let batch = ok(&mut a, "doc_batch", json!({ "paths": ["scan.pdf"], "steps": ["ocr"], "language": "fr", "out_dir": "out-batch" }));
     fell_back(&batch["files"][0]["steps"][0]);
+    let action =
+        ok(&mut a, "action_run", json!({ "action": "Optimize Scanned Documents", "paths": ["scan.pdf"], "folder": "out-action", "language": "fr" }));
+    fell_back(&action["files"][0]);
 }
 
 /// The reviewer's case through the tools: the accented-Latin model installed and English's not,
