@@ -254,6 +254,64 @@ fn dedupe_prefers_the_snapped_then_the_confident_word() {
     assert_eq!(overlap(&q(0.0), &[[f32::NAN, 0.0]; 4]), 0.0);
 }
 
+/// The reviewer's case: a small mark ("à") that ocrs made a line of its own, snapped to its box,
+/// and the host's crop reading it glued to the word before ("Bonjourà"), that word's box widened
+/// to take it in. The word holding more text stays, whatever the confidences: dropping it lost
+/// "Bonjour". Words of about the same extent still go by confidence.
+#[test]
+fn dedupe_keeps_the_word_that_holds_the_other() {
+    let q = |x0: f32, x1: f32| [[x0, 0.0], [x1, 0.0], [x1, 10.0], [x0, 10.0]];
+    let wd = |x0: f32, x1: f32, confidence: f32, text: &str| RecWord { text: text.into(), quad: q(x0, x1), confidence, snapped: true };
+    let frame = LineFrame::of_line(&[word(50.0, 5.0, 100.0, 10.0, 0.0)], Margins::default()).unwrap();
+    let line = |words: Vec<RecWord>| RecLine { words, confidence: 0.9, frame: frame.clone() };
+    let texts = |lines: &[RecLine]| lines.iter().map(|l| l.words.iter().map(|w| w.text.clone()).collect::<Vec<_>>()).collect::<Vec<_>>();
+    let mut lines = vec![
+        line(vec![wd(0.0, 40.0, 0.95, "Avec"), wd(50.0, 160.0, 0.7, "Bonjourà"), wd(170.0, 220.0, 0.95, "tous")]),
+        line(vec![wd(140.0, 160.0, 0.9, "à")]),
+    ];
+    dedupe(&mut lines);
+    assert_eq!(texts(&lines), [vec!["Avec", "Bonjourà", "tous"]]);
+    // The other way round, the line with the small word first: the same.
+    let mut lines = vec![line(vec![wd(140.0, 160.0, 0.9, "à")]), line(vec![wd(50.0, 160.0, 0.7, "Bonjourà")])];
+    dedupe(&mut lines);
+    assert_eq!(texts(&lines), [vec!["Bonjourà"]]);
+    // Two readings of the same word: the more confident one.
+    let mut lines = vec![line(vec![wd(50.0, 160.0, 0.7, "Bonjour")]), line(vec![wd(52.0, 158.0, 0.9, "Bonjouv")])];
+    dedupe(&mut lines);
+    assert_eq!(texts(&lines), [vec!["Bonjouv"]]);
+}
+
+/// The reviewer's letterhead: ocrs chained a tall logo with the first address line beside it, so
+/// that line's ink band covered the two address lines below it, beside the logo, and they were
+/// merged into it word by word ("CMO Tel: 32 Centre 0185 avenue Medical"). A fragment joins a
+/// line only on that line's own baseline, where the boxes beside it are.
+#[test]
+fn lines_beside_a_tall_box_are_not_merged_into_its_line() {
+    let wd = |x: f32, y: f32, w: f32, h: f32, t: &str| RecWord {
+        text: t.into(),
+        quad: [[x - w / 2.0, y - h / 2.0], [x + w / 2.0, y - h / 2.0], [x + w / 2.0, y + h / 2.0], [x - w / 2.0, y + h / 2.0]],
+        confidence: 0.9,
+        snapped: true,
+    };
+    let line = |words: Vec<RecWord>, boxes: &[RotatedRect]| RecLine {
+        words,
+        confidence: 0.9,
+        frame: LineFrame::of_line(boxes, Margins::default()).unwrap(),
+    };
+    let host = line(
+        vec![wd(100.0, 100.0, 100.0, 150.0, "CMO"), wd(300.0, 45.0, 200.0, 30.0, "Centre"), wd(550.0, 45.0, 200.0, 30.0, "Medical")],
+        &[word(100.0, 100.0, 100.0, 150.0, 0.0), word(300.0, 45.0, 200.0, 30.0, 0.0), word(550.0, 45.0, 200.0, 30.0, 0.0)],
+    );
+    let below = |y: f32, a: &str, b: &str| {
+        line(vec![wd(250.0, y, 120.0, 30.0, a), wd(420.0, y, 160.0, 30.0, b)], &[word(250.0, y, 120.0, 30.0, 0.0), word(420.0, y, 160.0, 30.0, 0.0)])
+    };
+    // A one-word line right beside the logo, which is far taller than the line's other boxes.
+    let fax = line(vec![wd(185.0, 125.0, 50.0, 20.0, "Fax")], &[word(185.0, 125.0, 50.0, 20.0, 0.0)]);
+    let out = merge_fragments(vec![host, below(95.0, "32", "avenue"), below(145.0, "Tel:", "0185"), fax]);
+    let texts: Vec<Vec<&str>> = out.iter().map(|l| l.words.iter().map(|w| w.text.as_str()).collect()).collect();
+    assert_eq!(texts, [vec!["CMO", "Centre", "Medical"], vec!["32", "avenue"], vec!["Tel:", "0185"], vec!["Fax"]]);
+}
+
 /// A crowded page is read in full, a batch at a time. Its crops used to be capped per page,
 /// which left the lines past the cap unread, and said nothing.
 #[test]

@@ -346,12 +346,18 @@ pub(crate) fn centre(q: &Quad) -> [f32; 2] {
 
 /// How much of the smaller of `a` and `b` lies in the other, from 0 to 1, measured along
 /// `a`'s own axes (words on one line share its skew).
+#[cfg(test)]
 fn overlap(a: &Quad, b: &Quad) -> f32 {
+    overlap_and_areas(a, b).0
+}
+
+/// [`overlap`], and the areas of `a` and `b` measured the same way (0 for a degenerate quad).
+fn overlap_and_areas(a: &Quad, b: &Quad) -> (f32, f32, f32) {
     let [tl, tr, _, bl] = *a;
     let (d, n) = ([tr[0] - tl[0], tr[1] - tl[1]], [bl[0] - tl[0], bl[1] - tl[1]]);
     let (ld, ln) = (d[0].hypot(d[1]), n[0].hypot(n[1]));
     if !(ld > 1e-3 && ln > 1e-3 && ld.is_finite() && ln.is_finite()) {
-        return 0.0;
+        return (0.0, 0.0, 0.0);
     }
     let (d, n) = ([d[0] / ld, d[1] / ld], [n[0] / ln, n[1] / ln]);
     let extent = |q: &Quad| {
@@ -366,17 +372,34 @@ fn overlap(a: &Quad, b: &Quad) -> f32 {
     let (ea, eb) = (extent(a), extent(b));
     let area = |e: [f32; 4]| (e[1] - e[0]).max(0.0) * (e[3] - e[2]).max(0.0);
     let inter = area([ea[0].max(eb[0]), ea[1].min(eb[1]), ea[2].max(eb[2]), ea[3].min(eb[3])]);
-    let smaller = area(ea).min(area(eb));
+    let (area_a, area_b) = (area(ea), area(eb));
+    let smaller = area_a.min(area_b);
     let f = inter / smaller;
-    if smaller > 0.0 && f.is_finite() { f.min(1.0) } else { 0.0 }
+    (if smaller > 0.0 && f.is_finite() { f.min(1.0) } else { 0.0 }, area_a, area_b)
+}
+
+/// Of two words read from the same ink, whether `a` is the one to keep: the one snapped to a
+/// detection box (the box belongs to its crop's line); else the larger one when it holds more
+/// text (the other is part of it, such as a mark it was read glued to: "Bonjourà" and "à"),
+/// whatever their confidences; else the more confident one, else `a`, the first.
+fn keep_first(a: &RecWord, b: &RecWord, area_a: f32, area_b: f32) -> bool {
+    if a.snapped != b.snapped {
+        return a.snapped;
+    }
+    let (ca, cb) = (a.text.chars().count(), b.text.chars().count());
+    if area_a > area_b && ca > cb {
+        return true;
+    }
+    if area_b > area_a && cb > ca {
+        return false;
+    }
+    a.confidence >= b.confidence
 }
 
 /// Drop words read twice. Where a text line comes in several crops (ocrs split it, or it was
 /// split at a wide gap), the crops' margins overlap, and a word in the overlap, such as a small
 /// "à" with no detection box of its own, is read in both ("à à Châlons"). Of two words from
-/// different crops on the same ink, the one snapped to a detection box stays (the box belongs
-/// to its crop's line), else the more confident one, else the first. A line left without words
-/// goes.
+/// different crops on the same ink, one stays ([`keep_first`]). A line left without words goes.
 pub(crate) fn dedupe(lines: &mut Vec<RecLine>) {
     let boxes: Vec<[f32; 4]> = lines.iter().map(|l| bounds(l.words.iter().map(|w| &w.quad))).collect();
     let mut gone: Vec<Vec<bool>> = lines.iter().map(|l| vec![false; l.words.len()]).collect();
@@ -390,11 +413,14 @@ pub(crate) fn dedupe(lines: &mut Vec<RecLine>) {
                 for (b, wb) in lj.words.iter().enumerate() {
                     let gone_a = gone.get(i).and_then(|g| g.get(a)).copied().unwrap_or(true);
                     let gone_b = gone.get(j).and_then(|g| g.get(b)).copied().unwrap_or(true);
-                    if gone_a || gone_b || overlap(&wa.quad, &wb.quad) < SAME_INK {
+                    if gone_a || gone_b {
                         continue;
                     }
-                    let keep_a = if wa.snapped != wb.snapped { wa.snapped } else { wa.confidence >= wb.confidence };
-                    let (line, word) = if keep_a { (j, b) } else { (i, a) };
+                    let (shared, area_a, area_b) = overlap_and_areas(&wa.quad, &wb.quad);
+                    if shared < SAME_INK {
+                        continue;
+                    }
+                    let (line, word) = if keep_first(wa, wb, area_a, area_b) { (j, b) } else { (i, a) };
                     if let Some(g) = gone.get_mut(line).and_then(|g| g.get_mut(word)) {
                         *g = true;
                     }
@@ -409,12 +435,31 @@ pub(crate) fn dedupe(lines: &mut Vec<RecLine>) {
     lines.retain(|l| !l.words.is_empty());
 }
 
+/// Whether frame position (`u`, `v`) is on `frame`'s own baseline: across the line within one
+/// of the detection boxes beside it (with a tenth of its height to spare), those within two
+/// typical box heights of `u` along the line. A box more than twice as tall as is typical (a
+/// logo, a large heading that ocrs chained to the line) doesn't count. A line's ink band is not
+/// enough: such a box makes the band cover the lines beside it.
+fn on_baseline(frame: &LineFrame, u: f32, v: f32) -> bool {
+    let height = |b: &[f32; 4]| (b[3] - b[2]).max(0.0);
+    let mut heights: Vec<f32> = frame.words.iter().map(height).filter(|h| h.is_finite()).collect();
+    heights.sort_by(f32::total_cmp);
+    // The lower median: of a logo and one word, the word's.
+    let Some(typical) = heights.get(heights.len().saturating_sub(1) / 2).copied() else { return false };
+    let reach = 2.0 * typical;
+    frame.words.iter().any(|b| {
+        let spare = 0.1 * height(b);
+        height(b) <= 2.0 * typical && b[0] - reach <= u && u <= b[1] + reach && b[2] - spare <= v && v <= b[3] + spare
+    })
+}
+
 /// Put fragments back into their lines. ocrs sometimes makes a few words of a text line a line
 /// of their own (words a little off the baseline, such as "; año,"), which then comes after the
 /// line it is part of and breaks the reading order. A line whose every word is centred inside a
-/// longer line's frame, along it and across it within its ink, joins the longest such line, and
-/// that line's words are put in order along it. Lines one above the other, or side by side
-/// past the line's margin, stay apart.
+/// longer line's frame, along it and across it within its ink and [`on_baseline`], joins the
+/// longest such line, and that line's words are put in order along it. Lines one above the
+/// other, beside a tall box chained into a line, or side by side past the line's margin, stay
+/// apart.
 pub(crate) fn merge_fragments(lines: Vec<RecLine>) -> Vec<RecLine> {
     // A strict order, longer and then earlier, so following hosts always ends at a line that
     // has none.
@@ -423,7 +468,7 @@ pub(crate) fn merge_fragments(lines: Vec<RecLine>) -> Vec<RecLine> {
     let holds = |host: &RecLine, frag: &RecLine| {
         frag.words.iter().all(|w| {
             let [u, v] = host.frame.locate(centre(&w.quad));
-            (0.0..=host.frame.length).contains(&u) && (host.frame.ink[0]..=host.frame.ink[1]).contains(&v)
+            (0.0..=host.frame.length).contains(&u) && (host.frame.ink[0]..=host.frame.ink[1]).contains(&v) && on_baseline(&host.frame, u, v)
         })
     };
     let host: Vec<Option<usize>> = lines
