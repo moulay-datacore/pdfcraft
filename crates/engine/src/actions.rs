@@ -149,14 +149,16 @@ pub struct FileResult {
     pub ocr_fallback: Option<crate::ocr::Fallback>,
 }
 
-/// The language a Recognize text step reads a file in, as Recognize Text does: `pick` (the
+/// How a Recognize text step reads a file. In the language Recognize Text would: `pick` (the
 /// user's last choice in Recognize Text, a code or tag), else the file's own `/Lang`, else
-/// `interface` (the interface language), else English. Automation passes neither, so a run gives
-/// the same result anywhere.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// `interface` (the interface language), else English. Automation passes no interface language,
+/// so a run gives the same result anywhere. With `models`, or those found when `None`
+/// ([`Session::set_ocr_models`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OcrLanguage<'a> {
     pub pick: Option<&'a str>,
     pub interface: Option<&'a str>,
+    pub models: Option<&'a crate::ocr::Models>,
 }
 
 fn apply_step(
@@ -243,6 +245,7 @@ pub fn run_on(
     // A pick text recognition doesn't read (a damaged setting) is refused, leaving none: each
     // file's own language is followed instead.
     let _ = s.set_ocr_language(ocr.pick);
+    s.set_ocr_models(ocr.models.cloned());
     let mut id = s.open(name, None, bytes, None).map_err(|e| e.to_string())?;
     if let Some(why) = s.get(id).and_then(|d| d.read_only_reason.clone()) {
         return Err(why);

@@ -3266,6 +3266,9 @@ pub struct Session {
     date_language: Option<String>,
     /// Recognize Text's language when a run names none (see [`Session::set_ocr_language`]).
     ocr_language: Option<&'static pdfcraft_ocr::Language>,
+    /// The OCR models to read with, when not those [`pdfcraft_ocr::Models::find`] finds (see
+    /// [`Session::set_ocr_models`]).
+    ocr_models: Option<pdfcraft_ocr::Models>,
     /// What the XFA scripts' time limits are multiplied by (`None`: 1); see
     /// [`Session::with_xfa_time_scale`].
     xfa_time_scale: Option<u32>,

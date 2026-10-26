@@ -18,10 +18,12 @@ struct Recipe<'a> {
     steps: Vec<&'a str>,
     images: optimize::ImageSettings,
     ocr: ocr::OcrSettings,
+    /// The OCR models to read with ([`Automation::with_ocr_models`]); those found when `None`.
+    models: Option<&'a ocr::Models>,
 }
 
 impl<'a> Recipe<'a> {
-    fn parse(auto: &Automation, args: &'a Args) -> Result<Self> {
+    fn parse(auto: &'a Automation, args: &'a Args) -> Result<Self> {
         let steps = args.strs("steps")?;
         if steps.is_empty() || steps.len() > 3 {
             return Err(Args::wrong("steps", "one to three unique steps: convert, ocr, optimize"));
@@ -54,7 +56,7 @@ impl<'a> Recipe<'a> {
         if args.opt_num("dpi")?.is_some_and(|dpi| !(72.0..=600.0).contains(&dpi)) {
             return Err(Args::wrong("dpi", "72 to 600"));
         }
-        Ok(Self { steps, images, ocr: auto.ocr_settings(args)? })
+        Ok(Self { steps, images, ocr: auto.ocr_settings(args)?, models: auto.session().ocr_models() })
     }
 
     fn accepts(&self, path: &Path) -> bool {
@@ -78,7 +80,7 @@ impl<'a> Recipe<'a> {
             match *step {
                 "convert" => bytes = session.convert_to_pdf(name, &bytes)?.1,
                 "ocr" => {
-                    let engine = ocr::engine().map_err(failed)?;
+                    let engine = ocr::engine_with(self.models).map_err(failed)?;
                     let result = ocr::recognize_file(name, bytes, None, self.ocr.clone(), None, &engine, |_, _| true).map_err(failed)?;
                     let mut entry = json!({
                         "step": "ocr",

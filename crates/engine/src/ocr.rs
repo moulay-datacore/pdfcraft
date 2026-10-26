@@ -205,6 +205,11 @@ pub fn engine() -> Result<Arc<Ocr>, String> {
     engine_for(&Models::find().ok_or_else(|| OcrError::NoModels.to_string())?)
 }
 
+/// The recogniser for `models`, or for those [`Models::find`] finds when `None`.
+pub fn engine_with(models: Option<&Models>) -> Result<Arc<Ocr>, String> {
+    models.map_or_else(engine, engine_for)
+}
+
 /// The recogniser for `models`, loaded once and shared. It is loaded again when one of its
 /// files changes, so a model installed, repaired or replaced while the app runs is picked up
 /// (a recogniser remembers a model that failed to load). Each language's reader inside it is
@@ -231,6 +236,11 @@ pub fn engine_for(models: &Models) -> Result<Arc<Ocr>, String> {
 /// Whether the recognition models are installed: at least one language can be read.
 pub fn available() -> bool {
     Models::find().is_some()
+}
+
+/// Whether `models` (those [`Models::find`] finds when `None`) can read at least one language.
+pub fn available_with(models: Option<&Models>) -> bool {
+    models.map_or_else(available, |m| m.recognition.is_some() || m.latin.is_some())
 }
 
 /// Whether each of [`LANGUAGES`] can be read, in order, with `models` (the models
@@ -400,6 +410,23 @@ impl Session {
         self.ocr_language
     }
 
+    /// Read with `models` rather than those [`Models::find`] finds (`None`: find them again).
+    /// Tests use it to read with a set of models whatever is installed, and a host that keeps
+    /// its models elsewhere to point at them.
+    pub fn set_ocr_models(&mut self, models: Option<Models>) {
+        self.ocr_models = models;
+    }
+
+    /// See [`Session::set_ocr_models`].
+    pub fn ocr_models(&self) -> Option<&Models> {
+        self.ocr_models.as_ref()
+    }
+
+    /// The recogniser this session reads with ([`Session::set_ocr_models`], [`engine_for`]).
+    pub fn ocr_engine(&self) -> Result<Arc<Ocr>, String> {
+        engine_with(self.ocr_models.as_ref())
+    }
+
     /// The language document `id` is read as when a run names none: the session's OCR language
     /// (the user's last choice), else the document's own (its `/Lang`, when text recognition
     /// reads it), else `interface` (the interface language; automation passes none, so its
@@ -515,7 +542,7 @@ impl Session {
             return Err(why);
         }
         let job = self.ocr_job(id, pages, settings)?;
-        let ocr = engine()?;
+        let ocr = self.ocr_engine()?;
         let found = job.run(&ocr, |_, _| true)?;
         self.apply_ocr(id, &found.pages).map_err(|e| e.to_string())?;
         Ok(found)

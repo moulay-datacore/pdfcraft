@@ -279,10 +279,7 @@ pub(crate) fn fallback_note(fallback: Option<&Fallback>) -> String {
 
 /// The recogniser for `models` (those [`Models::find`] finds when `None`), loaded once and shared.
 fn engine(models: Option<&Models>) -> Result<Arc<Ocr>, String> {
-    match models {
-        Some(m) => pdfcraft_engine::ocr::engine_for(m),
-        None => pdfcraft_engine::ocr::engine(),
-    }
+    pdfcraft_engine::ocr::engine_with(models)
 }
 
 impl PdfCraftApp {

@@ -6405,17 +6405,19 @@ fn ocr_recognize_reads_french_and_replaces_its_own_text() {
 /// The reviewer's gap: no test saw a fallback reach a tool result. With the English models and
 /// no accented-Latin one, French is read as English and every OCR tool says so: language,
 /// fell_back_from and fallback_reason; replacing keeps the earlier text (skip_kind
-/// kept_earlier_text) rather than lose its accents (needs exactly those models; skipped
-/// otherwise).
+/// kept_earlier_text) rather than lose its accents. It reads with the English models alone
+/// (`with_ocr_models`), whatever else is installed: it used to need exactly those models to be
+/// found, and so skipped wherever all of them were (needs the English models; skipped without).
 #[test]
 fn ocr_tools_say_when_they_read_a_language_as_english() {
-    let dir = workdir("ocr-fallback");
-    let mut a = auto(&dir);
-    let status = ok(&mut a, "ocr_status", json!({}));
-    if status["languages"][1]["state"] != "falls_back_to_english" {
-        eprintln!("skipped: needs the English models without the accented-Latin one");
+    let Some(installed) = pdfcraft_engine::ocr::Models::find().filter(|m| m.recognition.is_some()) else {
+        eprintln!("skipped: the English models are not installed");
         return;
-    }
+    };
+    let dir = workdir("ocr-fallback");
+    let mut a = auto(&dir).with_ocr_models(Some(pdfcraft_engine::ocr::Models { latin: None, ..installed }));
+    let status = ok(&mut a, "ocr_status", json!({}));
+    assert_eq!((&status["languages"][0]["state"], &status["languages"][1]["state"]), (&json!("ready"), &json!("falls_back_to_english")), "{status}");
     let text = ok(&mut a, "doc_create", json!({ "from": "text", "text": "Read as English instead" }))["doc"].as_u64().unwrap();
     ok(&mut a, "doc_export_images", json!({ "doc": text, "folder": "scan", "dpi": 200, "pages": [1] }));
     let png = std::fs::read_dir(dir.join("scan")).unwrap().next().unwrap().unwrap().path();
@@ -6439,6 +6441,37 @@ fn ocr_tools_say_when_they_read_a_language_as_english() {
     fell_back(&files["files"][0]);
     let batch = ok(&mut a, "doc_batch", json!({ "paths": ["scan.pdf"], "steps": ["ocr"], "language": "fr", "out_dir": "out-batch" }));
     fell_back(&batch["files"][0]["steps"][0]);
+}
+
+/// The reviewer's case through the tools: the accented-Latin model installed and English's not,
+/// a file read as English is an error saying why, not a file with no words; `ocr_status` shows
+/// English missing and French ready (needs the accented-Latin model; skipped without it).
+#[test]
+fn ocr_tools_fail_a_file_whose_language_cannot_be_read() {
+    let Some(installed) = pdfcraft_engine::ocr::Models::find().filter(|m| m.latin.is_some()) else {
+        eprintln!("skipped: the accented-Latin model is not installed");
+        return;
+    };
+    let dir = workdir("ocr-no-english");
+    let mut a = auto(&dir).with_ocr_models(Some(pdfcraft_engine::ocr::Models { recognition: None, ..installed }));
+    let status = ok(&mut a, "ocr_status", json!({}));
+    assert_eq!((&status["languages"][0]["state"], &status["languages"][1]["state"]), (&json!("missing"), &json!("ready")), "{status}");
+    let text = ok(&mut a, "doc_create", json!({ "from": "text", "text": "Read in English" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_images", json!({ "doc": text, "folder": "scan", "dpi": 200, "pages": [1] }));
+    let png = std::fs::read_dir(dir.join("scan")).unwrap().next().unwrap().unwrap().path();
+    let scan = ok(&mut a, "doc_create", json!({ "from": "images", "paths": [png.to_string_lossy()] }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_save", json!({ "doc": scan, "path": "scan.pdf" }));
+    let r = a.call("ocr_recognize", &json!({ "doc": scan }));
+    assert!(matches!(&r, Err(e) if e.to_string().contains("not installed")), "{r:?}");
+    let files = ok(&mut a, "ocr_recognize_files", json!({ "paths": ["scan.pdf"], "folder": "out-files" }));
+    assert!(files["files"][0]["error"].as_str().unwrap().contains("not installed"), "{files}");
+    assert!(!dir.join("out-files/scan.pdf").exists());
+    let batch = ok(&mut a, "doc_batch", json!({ "paths": ["scan.pdf"], "steps": ["ocr"], "out_dir": "out-batch" }));
+    assert_eq!((&batch["completed"], &batch["failed"]), (&json!(0), &json!(1)), "{batch}");
+    assert!(batch["files"][0]["error"].as_str().unwrap().contains("not installed"), "{batch}");
+    let action = ok(&mut a, "action_run", json!({ "action": "Optimize Scanned Documents", "paths": ["scan.pdf"], "folder": "out-action" }));
+    assert!(action["files"][0]["error"].as_str().unwrap().contains("not installed"), "{action}");
+    assert!(ok(&mut a, "ocr_recognize", json!({ "doc": scan, "language": "fr" }))["words"].as_u64().unwrap() >= 2, "French is still read");
 }
 
 /// #1028: `skip_text_pages: false` reads a picture on a page that has its own text, and the

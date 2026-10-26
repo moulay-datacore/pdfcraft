@@ -99,9 +99,10 @@ impl PdfCraftApp {
         // A Recognize text step reads each file in the language Recognize Text would: the user's
         // pick, else the file's own, else the interface's.
         let pick = self.session.ocr_language().map(|l| l.code);
+        let models = self.ocr_models.clone();
         let work = move || {
             crate::i18n::set_current(lang);
-            let ocr = pdfcraft_engine::actions::OcrLanguage { pick, interface: Some(lang.code()) };
+            let ocr = pdfcraft_engine::actions::OcrLanguage { pick, interface: Some(lang.code()), models: models.as_ref() };
             let (mut ok, mut failed, mut fallback) = (0, Vec::new(), None);
             for (i, (name, bytes)) in files.into_iter().enumerate() {
                 if let Ok(mut s) = p.lock() {

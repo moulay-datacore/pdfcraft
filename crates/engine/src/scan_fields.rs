@@ -119,12 +119,12 @@ impl Session {
 
     /// The words text recognition reads on `page`, in the frame; none without the models.
     fn recognized_words(&self, id: DocId, page: usize, frame: &Frame) -> Vec<Word> {
-        if !ocr::available() {
+        if !ocr::available_with(self.ocr_models()) {
             return Vec::new();
         }
         // Read in the document's language (the session's OCR language, else its /Lang), so
         // labels keep their accents.
-        let (Ok(engine), Ok(job)) = (ocr::engine(), self.ocr_job(id, &[page], ocr::OcrSettings::default())) else {
+        let (Ok(engine), Ok(job)) = (self.ocr_engine(), self.ocr_job(id, &[page], ocr::OcrSettings::default())) else {
             return Vec::new();
         };
         job.run(&engine, |_, _| true)

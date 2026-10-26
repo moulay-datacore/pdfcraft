@@ -186,6 +186,13 @@ impl Automation {
         self
     }
 
+    /// Read text with `models` rather than those `Models::find` finds (`None`: find them):
+    /// every OCR tool, `ocr_status` and the Recognize text step of `action_run` use them.
+    pub fn with_ocr_models(mut self, models: Option<pdfcraft_engine::ocr::Models>) -> Self {
+        self.session.set_ocr_models(models);
+        self
+    }
+
     pub fn session(&self) -> &Session {
         &self.session
     }

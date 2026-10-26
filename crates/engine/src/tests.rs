@@ -4590,10 +4590,10 @@ fn the_recognize_text_step_of_an_action_reads_the_chosen_language() {
         let id = t.open("out.pdf", None, r.bytes.clone(), None).unwrap();
         (page_texts(&t, id)[0].clone(), r.log, r.ocr_fallback)
     };
-    let (text, log, fallback) = read(actions::OcrLanguage { pick: Some("fr"), interface: None });
+    let (text, log, fallback) = read(actions::OcrLanguage { pick: Some("fr"), ..Default::default() });
     assert!(text.contains("médecin") && text.contains("hôpital") && fallback.is_none(), "{text:?} {log:?}");
     assert!(log.iter().any(|l| l.contains("in French")), "{log:?}");
-    let (text, ..) = read(actions::OcrLanguage { pick: None, interface: Some("fr-CA") });
+    let (text, ..) = read(actions::OcrLanguage { interface: Some("fr-CA"), ..Default::default() });
     assert!(text.contains("médecin"), "the interface's language: {text:?}");
     let (text, log, _) = read(actions::OcrLanguage::default());
     assert!(
@@ -4603,23 +4603,26 @@ fn the_recognize_text_step_of_an_action_reads_the_chosen_language() {
 }
 
 /// An action's Recognize text step that reads a file as English instead of its language says
-/// so in its result, for the Action Wizard to show (needs the English models without the
-/// accented-Latin one; skipped otherwise).
+/// so in its result, for the Action Wizard to show. The reviewer's gap: this test needed exactly
+/// the English models and no accented-Latin one to be found, so it skipped wherever all the
+/// models were installed. It reads with the English models alone, whatever else is installed
+/// (needs the English models; skipped without them).
 #[test]
 fn an_action_says_when_it_read_a_file_as_english() {
-    let fr = ocr::language("fr").unwrap();
-    if ocr::availability(fr) != ocr::Availability::FallsBackToEnglish {
-        eprintln!("skipped: needs the English models without the accented-Latin one");
+    let Some(installed) = ocr::Models::find().filter(|m| m.recognition.is_some()) else {
+        eprintln!("skipped: the English models are not installed");
         return;
-    }
+    };
+    let english_only = ocr::Models { latin: None, ..installed };
     let mut s = Session::new().with_clock(|| 1_700_000_000);
     let id = synthetic_scan_of(&mut s, "Le médecin");
     let scan = s.get(id).unwrap().bytes.clone();
     let optimize = actions::builtin().into_iter().find(|a| a.name == "Optimize Scanned Documents").unwrap();
-    let r = actions::run_on(&optimize, "scan.pdf", scan.clone(), actions::OcrLanguage { pick: Some("fr"), interface: None }, |_, _| {}).unwrap();
+    let with = |pick| actions::OcrLanguage { pick, models: Some(&english_only), ..Default::default() };
+    let r = actions::run_on(&optimize, "scan.pdf", scan.clone(), with(Some("fr")), |_, _| {}).unwrap();
     assert_eq!(r.ocr_fallback.as_ref().map(|f| (f.from.code, &f.reason)), Some(("fr", &ocr::FallbackReason::NotInstalled)), "{:?}", r.log);
     assert!(r.log.iter().any(|l| l.contains("in English (read as English instead of French)")), "{:?}", r.log);
-    let r = actions::run_on(&optimize, "scan.pdf", scan, actions::OcrLanguage::default(), |_, _| {}).unwrap();
+    let r = actions::run_on(&optimize, "scan.pdf", scan, with(None), |_, _| {}).unwrap();
     assert!(r.ocr_fallback.is_none(), "English is read as itself");
 }
 
