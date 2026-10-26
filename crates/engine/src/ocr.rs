@@ -432,8 +432,15 @@ impl Session {
     /// reads it), else `interface` (the interface language; automation passes none, so its
     /// runs don't depend on where they run), else English.
     pub fn ocr_language_for(&self, id: DocId, interface: Option<&str>) -> &'static Language {
+        self.ocr_language.unwrap_or_else(|| self.document_ocr_language(id, interface))
+    }
+
+    /// The language document `id` is read as when the user has picked none
+    /// ([`Session::ocr_language_for`] without the session's OCR language): its `/Lang`, when
+    /// text recognition reads it, else `interface`, else English.
+    pub fn document_ocr_language(&self, id: DocId, interface: Option<&str>) -> &'static Language {
         let document = self.get(id).and_then(|d| d.initial_view().language);
-        pdfcraft_ocr::first_language([self.ocr_language.map(|l| l.code), document.as_deref(), interface])
+        pdfcraft_ocr::first_language([document.as_deref(), interface])
     }
 
     /// Of `pages` (0-based; empty = all), those that have PdfCraft's own OCR text, which

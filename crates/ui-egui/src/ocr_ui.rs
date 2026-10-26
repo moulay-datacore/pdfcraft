@@ -33,16 +33,35 @@ pub struct OcrDraft {
     /// Also recognize pages that already have text (pictures on them; their text isn't added again).
     pub text_pages: bool,
     /// Replace the text PdfCraft recognized on these pages before ([`OcrSettings::replace_ocr`]).
-    /// Offered only when one of the pages has some.
+    /// Offered only when one of the pages has some, and opted into for each run: opening the
+    /// dialog clears it.
     pub replace: bool,
-    /// Whether the language was picked in the dialog since it opened: it becomes the user's
-    /// choice for every document once Recognize text is pressed, not on Cancel.
+    /// The language the dialog opened with ([`PdfCraftApp::open_recognize_text`]).
+    pub opened: String,
+    /// Whether another language than the one it opened with was picked in the dialog: it
+    /// becomes the user's choice for every document once Recognize text is pressed, not on
+    /// Cancel.
     pub picked: bool,
+    /// Whether the picker's Automatic entry was picked: `language` is the document's own
+    /// language, and once run, the user's earlier pick is forgotten, so every document is read
+    /// in its own language again ([`pdfcraft_engine::Session::document_ocr_language`]).
+    pub automatic: bool,
 }
 
 impl Default for OcrDraft {
     fn default() -> Self {
-        OcrDraft { pages: OcrPages::All, from: 1, to: 1, language: "en".into(), dpi: 300, text_pages: false, replace: false, picked: false }
+        OcrDraft {
+            pages: OcrPages::All,
+            from: 1,
+            to: 1,
+            language: "en".into(),
+            dpi: 300,
+            text_pages: false,
+            replace: false,
+            opened: "en".into(),
+            picked: false,
+            automatic: false,
+        }
     }
 }
 
@@ -130,6 +149,8 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     let statuses = app.ocr_statuses();
     let available = statuses.iter().any(|(_, a)| *a != Availability::Missing);
     let own = active.map(|(_, id)| app.own_ocr_text(id)).unwrap_or_default();
+    // What the picker's Automatic entry reads: the document's own language, else the interface's.
+    let automatic = active.map(|(_, id)| app.session.document_ocr_language(id, Some(crate::i18n::current().code())));
     let d = &mut app.ocr_draft;
     d.to = d.to.clamp(1, pages);
     d.from = d.from.clamp(1, d.to);
@@ -158,13 +179,25 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     group(ui, "Settings", &mut |ui| {
         egui::Grid::new("ocr-settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label(tl!("Document language"));
-            let shown =
-                statuses.iter().find(|(l, _)| l.code == d.language).map_or_else(|| tl!("English").to_string(), |(l, a)| language_label(l, *a));
+            let label =
+                |code: &str| statuses.iter().find(|(l, _)| l.code == code).map_or_else(|| tl!("English").to_string(), |(l, a)| language_label(l, *a));
+            let automatic_label = |code: &str| crate::i18n::fmt(tl!("Automatic ({language})"), &[("language", &label(code))]);
+            let shown = if d.automatic { automatic_label(&d.language) } else { label(&d.language) };
             egui::ComboBox::from_id_salt("ocr-language").selected_text(shown).width(220.0).show_ui(ui, |ui| {
+                // Back to following each document's language, after a pick.
+                if let Some(auto) = automatic
+                    && ui.selectable_label(d.automatic, automatic_label(auto.code)).clicked()
+                {
+                    d.language = auto.code.to_string();
+                    d.automatic = true;
+                    d.picked = true;
+                }
                 for (l, a) in &statuses {
-                    if ui.selectable_label(d.language == l.code, language_label(l, *a)).clicked() {
+                    if ui.selectable_label(d.language == l.code && !d.automatic, language_label(l, *a)).clicked() {
                         d.language = l.code.to_string();
-                        d.picked = true;
+                        d.automatic = false;
+                        // The language it opened with, picked again, is no new pick.
+                        d.picked = d.language != d.opened;
                     }
                 }
             });
@@ -238,9 +271,10 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     });
     // A language picked here is the user's choice from now on, for every document
     // ([`pdfcraft_engine::Session::set_ocr_language`]), once it is run; one the dialog opened with
-    // is not, and neither is one looked at and cancelled.
+    // is not, and neither is one looked at and cancelled. Automatic, run, forgets the pick.
     if go && app.ocr_draft.picked {
-        let _ = app.session.set_ocr_language(Some(&app.ocr_draft.language));
+        let pick = (!app.ocr_draft.automatic).then_some(app.ocr_draft.language.as_str());
+        let _ = app.session.set_ocr_language(pick);
     }
     (go, cancel)
 }
@@ -301,12 +335,16 @@ impl PdfCraftApp {
         self.dialog = Some(crate::Dialog::RecognizeText);
     }
 
-    /// Set the Recognize Text language to the active document's default; nothing is picked yet.
+    /// Set the Recognize Text language to the active document's default; nothing is picked yet,
+    /// and nothing is replaced unless it is asked for again.
     pub(crate) fn seed_ocr_language(&mut self) {
         if let Some((_, id)) = self.active_ids() {
             self.ocr_draft.language = self.ocr_language_for(id).code.to_string();
         }
+        self.ocr_draft.opened = self.ocr_draft.language.clone();
         self.ocr_draft.picked = false;
+        self.ocr_draft.automatic = false;
+        self.ocr_draft.replace = false;
     }
 
     /// The pages of document `id` that have text PdfCraft recognized before, judged once per
@@ -978,6 +1016,20 @@ mod tests {
         assert_eq!(opened(&mut app), "de", "auto follows the document again");
         app.set_option("dialog", "recognize-text").unwrap();
         assert_eq!(app.ocr_draft.language, "de", "the control channel opens it the same way");
+    }
+
+    /// The reviewer's defect: "Replace existing OCR text", ticked for one document, stayed ticked
+    /// for the next, which then had its good OCR text read again and replaced unasked. It is
+    /// asked for each time the dialog opens.
+    #[test]
+    fn replacing_is_asked_for_each_time_the_dialog_opens() {
+        let mut app = app_with(scan());
+        app.ocr_draft.replace = true;
+        app.open_recognize_text();
+        assert!(!app.ocr_draft.replace);
+        app.ocr_draft.replace = true;
+        app.recognize_text_on_page(0);
+        assert!(!app.ocr_draft.replace, "from a page's context menu too");
     }
 
     /// The user's pick survives a restart; a value text recognition doesn't read, from a damaged

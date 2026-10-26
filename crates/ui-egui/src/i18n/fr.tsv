@@ -1293,6 +1293,7 @@
 	{language} — read as English	{language} — lu comme de l'anglais
 	{language} — not installed	{language} — non installé
 	{language} — couldn't be loaded	{language} — n'a pas pu être chargé
+	Automatic ({language})	Automatique ({language})
 	This language's model isn't available: its text will be read as English, without accents.	Le modèle de cette langue n'est pas disponible : son texte sera lu comme de l'anglais, sans les accents.
 	This language's model isn't installed.	Le modèle de cette langue n'est pas installé.
 	This language's model couldn't be loaded: reinstall PdfCraft.	Le modèle de cette langue n'a pas pu être chargé : réinstallez PdfCraft.

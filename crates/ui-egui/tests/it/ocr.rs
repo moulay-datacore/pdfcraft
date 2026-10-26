@@ -439,6 +439,40 @@ fn a_language_picked_and_cancelled_is_not_remembered() {
     assert_eq!(h.state().session.ocr_language().map(|l| l.code), Some("de"), "run, it is remembered");
 }
 
+/// The reviewer's defect: once a language was picked, nothing in the dialog went back to
+/// reading each document in its own language, and picking again the language it opened with
+/// made that a pick for every document. The Automatic entry forgets the pick once run; the
+/// language it opened with, picked again, is no pick.
+#[test]
+fn the_picker_can_go_back_to_each_document_s_language() {
+    let mut h = recognize_dialog(scan(), Some(models(true, true)));
+    h.state_mut().set_option("ocr-language", "de").unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().ocr_draft.language, "de", "a pick made before");
+    open_language_picker(&mut h, "German");
+    h.get_by_label("Automatic (English)").click();
+    h.run_steps(4);
+    assert!(h.query_by(|n| n.role() == Role::ComboBox && n.value().as_deref() == Some("Automatic (English)")).is_some());
+    assert_eq!((h.state().ocr_draft.language.as_str(), h.state().session.ocr_language().map(|l| l.code)), ("en", Some("de")), "not until run");
+    h.get_by_label("Recognize text").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.ocr_language(), None, "each document's own language again");
+    let saved: serde_json::Value = serde_json::from_str(&h.state().persist()).unwrap();
+    assert!(saved["ocr_language"].is_null(), "{}", saved["ocr_language"]);
+
+    assert!(h.state_mut().execute("ocr.recognize"));
+    h.run_steps(2);
+    open_language_picker(&mut h, "English");
+    h.get_by_label("German").click();
+    h.run_steps(4);
+    open_language_picker(&mut h, "German");
+    h.get_by_label("English").click();
+    h.run_steps(4);
+    h.get_by_label("Recognize text").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.ocr_language(), None, "the language it opened with is no pick");
+}
+
 /// With only the accented-Latin model, English can't be read at all: it says so and Recognize
 /// waits for another language, which is read as itself.
 #[test]
