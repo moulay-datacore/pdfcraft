@@ -5320,6 +5320,40 @@ fn detecting_fields_on_a_scanned_form() {
     }
 }
 
+/// The reviewer's gap: form detection was said to name fields from labels read in the
+/// document's language, with their accents, untested. A scanned French form's fields are named
+/// "Prénom" and "Téléphone…" when the document says it is French, and the user's Recognize Text
+/// pick comes before that (needs the English and accented-Latin models; skipped without them).
+#[test]
+fn fields_on_a_scanned_french_form_are_named_with_their_accents() {
+    let fr = ocr::language("fr").unwrap();
+    if ocr::availability(fr) != ocr::Availability::Ready || ocr::availability(ocr::ENGLISH) != ocr::Availability::Ready {
+        eprintln!("skipped: the French and English recognition models are not installed");
+        return;
+    }
+    // A rule after "Prénom :" and a box below "Téléphone", in WinAnsi Helvetica, scanned.
+    let body = "BT /F1 16 Tf 30 230 Td (Pr\\351nom :) Tj ET 0.75 w 130 228 m 560 228 l S \
+        BT /F1 12 Tf 30 146 Td (T\\351l\\351phone) Tj ET 1 w 30 100 530 40 re S";
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let paper = s.open("paper.pdf", None, Arc::new(one_line_page("/Font << /F1 4 0 R >>", body)), None).unwrap();
+    assert_eq!(page_texts(&s, paper)[0].split_whitespace().collect::<Vec<_>>(), ["Prénom", ":", "Téléphone"]);
+    let png = export::Exporter::new(s.get(paper).unwrap()).png(0, 200.0).unwrap();
+    let scan = s.create_from_images_with_resolution(&[("scan.png".into(), png)], ImageResolution::Dpi(200.0)).unwrap();
+    let id = s.open("scan.pdf", None, scan, None).unwrap();
+    let names = |s: &Session| -> Vec<String> { s.detect_fields(id, &[]).into_iter().map(|(_, c)| c.name).collect() };
+
+    let english = names(&s);
+    assert!(english.len() == 2 && english.iter().all(|n| !n.contains('é')), "no /Lang: read as English, without accents: {english:?}");
+    let mut view = s.get(id).unwrap().initial_view();
+    view.language = Some("fr-FR".into());
+    s.apply(id, Edit::SetInitialView(Box::new(view))).unwrap();
+    let french = names(&s);
+    assert!(french.iter().any(|n| n == "Prénom") && french.iter().any(|n| n.starts_with("Téléphone")), "its /Lang: {french:?}");
+    s.set_ocr_language(Some("en")).unwrap();
+    let picked = names(&s);
+    assert!(picked.len() == 2 && picked.iter().all(|n| !n.contains('é')), "the user's pick before its /Lang: {picked:?}");
+}
+
 #[test]
 fn detecting_comb_boxes_adds_one_comb_field_per_row() {
     // The rows from #1887: five 18 x 22 cells and ten 16 x 20 cells, each a stroked `re`.
