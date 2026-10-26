@@ -2558,3 +2558,31 @@ animation effects	Off	Aus
 	Rotate the selected pages clockwise	Ausgewählte Seiten im Uhrzeigersinn drehen
 	Extract the selected pages…	Ausgewählte Seiten extrahieren…
 	Delete the selected pages	Ausgewählte Seiten löschen
+
+# Recognize Text: reading languages, replacing earlier OCR text, its results (AI-assisted, not separately native-reviewed)
+	English	Englisch
+	French	Französisch
+	German	Deutsch
+	Spanish	Spanisch
+	Italian	Italienisch
+	Portuguese	Portugiesisch
+	Dutch	Niederländisch
+	{language} — read as English	{language} — als Englisch gelesen
+	{language} — not installed	{language} — nicht installiert
+	{language} — couldn't be loaded	{language} — konnte nicht geladen werden
+	Automatic ({language})	Automatisch ({language})
+	This language's model isn't available: its text will be read as English, without accents.	Das Modell dieser Sprache ist nicht verfügbar: ihr Text wird als Englisch gelesen, ohne Akzente.
+	This language's model isn't installed.	Das Modell dieser Sprache ist nicht installiert.
+	This language's model couldn't be loaded: reinstall PdfCraft.	Das Modell dieser Sprache konnte nicht geladen werden: installiere PdfCraft neu.
+	Replace existing OCR text	Vorhandenen OCR-Text ersetzen
+	Pages with text PdfCraft recognized before are read again, and the new text takes its place; other text on them stays	Seiten mit Text, den PdfCraft zuvor erkannt hat, werden erneut gelesen, und der neue Text tritt an seine Stelle; anderer Text auf ihnen bleibt erhalten
+	; read as English: the {language} model isn't installed	; als Englisch gelesen: das Modell für {language} ist nicht installiert
+	; read as English: the {language} model couldn't be loaded ({e})	; als Englisch gelesen: das Modell für {language} konnte nicht geladen werden ({e})
+	; replaced the earlier recognized text on 1 page	; zuvor erkannter Text auf 1 Seite ersetzt
+	; replaced the earlier recognized text on {n} pages	; zuvor erkannter Text auf {n} Seiten ersetzt
+	; 1 page couldn't be read	; 1 Seite konnte nicht gelesen werden
+	; {n} pages couldn't be read	; {n} Seiten konnten nicht gelesen werden
+	; kept the earlier recognized text on 1 page	; zuvor erkannter Text auf 1 Seite beibehalten
+	; kept the earlier recognized text on {n} pages	; zuvor erkannter Text auf {n} Seiten beibehalten
+	; 1 page was left as it was: its recognized text changed during the run	; 1 Seite blieb unverändert: ihr erkannter Text hat sich während der Erkennung geändert
+	; {n} pages were left as they were: their recognized text changed during the run	; {n} Seiten blieben unverändert: ihr erkannter Text hat sich während der Erkennung geändert

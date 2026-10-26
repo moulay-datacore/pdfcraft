@@ -2789,3 +2789,30 @@ certificate	SHA-256 digest	Impronta SHA-256
 	Rotate the selected pages clockwise	Ruota le pagine selezionate in senso orario
 	Extract the selected pages…	Estrai le pagine selezionate…
 	Delete the selected pages	Elimina le pagine selezionate
+
+# Recognize Text: reading languages, replacing earlier OCR text, its results (AI-assisted, not separately native-reviewed)
+	French	Francese
+	German	Tedesco
+	Spanish	Spagnolo
+	Italian	Italiano
+	Portuguese	Portoghese
+	Dutch	Olandese
+	{language} — read as English	{language} — letto come inglese
+	{language} — not installed	{language} — non installato
+	{language} — couldn't be loaded	{language} — impossibile caricare il modello
+	Automatic ({language})	Automatica ({language})
+	This language's model isn't available: its text will be read as English, without accents.	Il modello di questa lingua non è disponibile: il suo testo verrà letto come inglese, senza accenti.
+	This language's model isn't installed.	Il modello di questa lingua non è installato.
+	This language's model couldn't be loaded: reinstall PdfCraft.	Impossibile caricare il modello di questa lingua: reinstalla PdfCraft.
+	Replace existing OCR text	Sostituisci il testo OCR esistente
+	Pages with text PdfCraft recognized before are read again, and the new text takes its place; other text on them stays	Le pagine con testo già riconosciuto da PdfCraft vengono rilette e il nuovo testo ne prende il posto; il resto del testo su di esse rimane
+	; read as English: the {language} model isn't installed	; letto come inglese: il modello della lingua {language} non è installato
+	; read as English: the {language} model couldn't be loaded ({e})	; letto come inglese: impossibile caricare il modello della lingua {language} ({e})
+	; replaced the earlier recognized text on 1 page	; testo riconosciuto in precedenza sostituito su 1 pagina
+	; replaced the earlier recognized text on {n} pages	; testo riconosciuto in precedenza sostituito su {n} pagine
+	; 1 page couldn't be read	; impossibile leggere 1 pagina
+	; {n} pages couldn't be read	; impossibile leggere {n} pagine
+	; kept the earlier recognized text on 1 page	; testo riconosciuto in precedenza mantenuto su 1 pagina
+	; kept the earlier recognized text on {n} pages	; testo riconosciuto in precedenza mantenuto su {n} pagine
+	; 1 page was left as it was: its recognized text changed during the run	; 1 pagina è stata lasciata com'era: il suo testo riconosciuto è cambiato durante il riconoscimento
+	; {n} pages were left as they were: their recognized text changed during the run	; {n} pagine sono state lasciate com'erano: il loro testo riconosciuto è cambiato durante il riconoscimento
