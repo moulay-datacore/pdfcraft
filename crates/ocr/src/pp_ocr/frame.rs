@@ -18,9 +18,9 @@ const MIN_CROP_WIDTH: usize = 8;
 /// A long line follows the page's skew when its own angle is within this many degrees of it
 /// (one line's estimate is good to about 0.4°): a stamp, which leans its own way, keeps its own.
 const LINE_SKEW_TOLERANCE: f32 = 1.0;
-/// A page with no line long enough to measure its skew takes its short lines' median angle,
-/// kept within this many degrees of level: one or two word boxes give an angle that can be ten
-/// degrees off, while scans are rarely skewed more than this.
+/// A page's skew is kept within this many degrees of level unless most of its lines agree on
+/// more ([`page_skew`]): one or two word boxes give an angle that can be ten degrees off, a stamp
+/// leans its own way, while scans are rarely skewed more than this.
 const MAX_GUESSED_SKEW: f32 = 3.0;
 
 /// A grey image, one byte per pixel, rows top to bottom.
@@ -168,21 +168,43 @@ fn median(mut v: Vec<f32>) -> Option<f32> {
     v.get(v.len() / 2).copied()
 }
 
-/// The direction each line is read along. A scan is skewed as a whole, so the page's skew (the
-/// median angle of the lines long enough to measure it) is the best estimate for every line
-/// that agrees with it, and for every line too short to be measured at all: a short line's own
-/// angle comes from a word box or two (a logo's strokes, a descender) and can be far off, which
-/// would tilt its crop and its text layer. A long line that clearly leans another way (a stamp)
-/// keeps its own angle. A page without a long line takes its short lines' median angle, kept
-/// within [`MAX_GUESSED_SKEW`] of level.
+/// The lower median: of two middle values, the smaller one's index, so two lines that disagree
+/// (a body line and a stamp) give the first of them in angle order rather than the larger.
+fn lower_median(mut v: Vec<f32>) -> Option<f32> {
+    v.sort_by(f32::total_cmp);
+    v.get(v.len().saturating_sub(1) / 2).copied()
+}
+
+/// Long lines that must agree on a skew past [`MAX_GUESSED_SKEW`] before the page takes it.
+const MIN_AGREEING: usize = 3;
+
+/// The page's skew, in radians, from its lines' directions. The long ("sure") lines within
+/// [`MAX_GUESSED_SKEW`] of level measure it best: their lower median. A skew past that is taken
+/// only when at least [`MIN_AGREEING`] long lines agree on it and most of the page's lines lean
+/// within [`MAX_GUESSED_SKEW`] of it (a page scanned askew), never from one or two long lines
+/// that lean their own way (a stamp, a tall logo chained to a line beside it) among short ones.
+/// Otherwise the median angle of every line, kept within [`MAX_GUESSED_SKEW`] of level.
+fn page_skew(dirs: &[Option<Direction>]) -> Option<f32> {
+    let limit = MAX_GUESSED_SKEW.to_radians();
+    let all: Vec<f32> = dirs.iter().flatten().map(Direction::angle).filter(|a| a.is_finite()).collect();
+    let sure: Vec<f32> = dirs.iter().flatten().filter(|d| d.sure).map(Direction::angle).filter(|a| a.is_finite()).collect();
+    if let Some(m) = lower_median(sure.clone()).filter(|m| m.abs() > limit) {
+        let agreeing = sure.iter().filter(|a| (*a - m).abs() < LINE_SKEW_TOLERANCE.to_radians()).count();
+        let leaning = all.iter().filter(|a| (*a - m).abs() <= limit).count();
+        if agreeing >= MIN_AGREEING && leaning.saturating_mul(2) > all.len() {
+            return Some(m);
+        }
+    }
+    lower_median(sure.into_iter().filter(|a| a.abs() <= limit).collect()).or_else(|| lower_median(all).map(|a| a.clamp(-limit, limit)))
+}
+
+/// The direction each line is read along. A scan is skewed as a whole, so the page's skew
+/// ([`page_skew`]) is the best estimate for every line that agrees with it, and for every line
+/// too short to be measured at all: a short line's own angle comes from a word box or two (a
+/// logo's strokes, a descender) and can be far off, which would tilt its crop and its text
+/// layer. A long line that clearly leans another way (a stamp) keeps its own angle.
 pub(crate) fn line_directions(dirs: &[Option<Direction>]) -> Vec<Option<[f32; 2]>> {
-    let sure: Vec<f32> = dirs.iter().flatten().filter(|d| d.sure).map(Direction::angle).collect();
-    let page = if sure.is_empty() {
-        let limit = MAX_GUESSED_SKEW.to_radians();
-        median(dirs.iter().flatten().map(Direction::angle).collect()).map(|a| a.clamp(-limit, limit))
-    } else {
-        median(sure)
-    };
+    let page = page_skew(dirs);
     dirs.iter()
         .map(|dir| {
             let (dir, page) = (dir.as_ref()?, page?);
@@ -411,6 +433,37 @@ pub(crate) mod tests {
         let got = line_directions(&[short(18.5)]);
         assert!((deg(&got[0]).unwrap() - MAX_GUESSED_SKEW).abs() < 0.01, "{got:?}");
         assert!(line_directions(&[]).is_empty());
+    }
+
+    /// The reviewer's defect: one or two long lines that lean their own way (a stamp, a tall
+    /// logo chained to a line beside it) set the page's skew, and every short line of a form
+    /// was read tilted with them. A page's skew goes past [`MAX_GUESSED_SKEW`] only when most
+    /// of its lines lean that way.
+    #[test]
+    fn a_leaning_stamp_does_not_set_the_page_skew() {
+        let deg = |d: &Option<[f32; 2]>| d.map_or(f32::NAN, |d| d[1].atan2(d[0]).to_degrees());
+        let degs = |got: &[Option<[f32; 2]>]| got.iter().map(deg).collect::<Vec<_>>();
+        let long = |y: f32, deg: f32| direction(&oriented(&line_of(100.0, y, deg, &[0.0, 200.0, 400.0, 600.0, 800.0], 150.0, 30.0)));
+        let short = |y: f32, deg: f32| direction(&oriented(&line_of(100.0, y, deg, &[0.0, 120.0], 100.0, 30.0)));
+        assert!(long(0.0, 20.0).unwrap().sure && !short(0.0, 0.0).unwrap().sure);
+        // Level labels and one stamp at 20°: the labels stay level, the stamp keeps its own.
+        let got = line_directions(&[short(100.0, 0.0), short(200.0, 0.0), short(300.0, 0.0), long(400.0, 20.0)]);
+        assert!(got.iter().take(3).all(|d| deg(d).abs() < 0.01) && (deg(&got[3]) - 20.0).abs() < 0.01, "{:?}", degs(&got));
+        // One body line at 0.5° and a stamp at 20°: the body line's skew, not the stamp's.
+        let got = line_directions(&[long(100.0, 0.5), short(200.0, 0.5), short(300.0, 0.5), long(600.0, 20.0)]);
+        assert!(got.iter().take(3).all(|d| (deg(d) - 0.5).abs() < 0.01), "{:?}", degs(&got));
+        // A stamp of three lines among level labels: still level.
+        let mut dirs: Vec<Option<Direction>> = (0..8).map(|i| short(100.0 + 40.0 * i as f32, 0.0)).collect();
+        dirs.extend([long(600.0, 20.0), long(640.0, 20.0), long(680.0, 20.0)]);
+        let got = line_directions(&dirs);
+        assert!(got.iter().take(8).all(|d| deg(d).abs() < 0.01), "{:?}", degs(&got));
+        // A page that really is skewed 6°, its short lines too: they follow it.
+        let mut dirs: Vec<Option<Direction>> = (0..3).map(|i| long(100.0 + 50.0 * i as f32, 6.0)).collect();
+        dirs.extend((0..4).map(|i| short(300.0 + 50.0 * i as f32, 6.3)));
+        dirs.push(None);
+        let got = line_directions(&dirs);
+        assert!(got.iter().take(7).all(|d| (deg(d) - 6.0).abs() < 0.01), "{:?}", degs(&got));
+        assert_eq!(got[7], None);
     }
 
     #[test]

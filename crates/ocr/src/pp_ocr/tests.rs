@@ -100,6 +100,85 @@ fn words_come_back_where_their_ink_is_and_follow_the_skew() {
     }
 }
 
+/// Draw a black bar `len` × `thick` px centred at (`cx`, `cy`), turned `deg` degrees (down to
+/// the right), on a white page `w` px wide.
+fn bar(px: &mut [u8], w: usize, (cx, cy): (f32, f32), (len, thick): (f32, f32), deg: f32) {
+    let (s, c) = deg.to_radians().sin_cos();
+    for (i, p) in px.iter_mut().enumerate() {
+        let r = [(i % w) as f32 + 0.5 - cx, (i / w) as f32 + 0.5 - cy];
+        if (r[0] * c + r[1] * s).abs() < len / 2.0 && (r[1] * c - r[0] * s).abs() < thick / 2.0 {
+            *p = 0;
+        }
+    }
+}
+
+/// The angle of a word's top edge, in degrees.
+fn angle_of(wd: &RecWord) -> f32 {
+    let [tl, tr, _, _] = wd.quad;
+    (tr[1] - tl[1]).atan2(tr[0] - tl[0]).to_degrees()
+}
+
+/// The prototype's defect, through the recognizer: a short line's own angle came from a word
+/// box or two (a logo's strokes: 18.5°), and its crop and words were tilted with it. It is read
+/// at the page's skew, which the long lines measure (0.7°).
+#[test]
+fn a_short_line_is_read_at_the_page_skew_not_its_own_box_angle() {
+    let (w, h, deg) = (1000, 420, 0.7);
+    let blobs = [(60, 200), (240, 300), (340, 520), (560, 700), (740, 840)];
+    let mut px = vec![255u8; w * h];
+    let mut lines: Vec<Vec<RotatedRect>> = Vec::new();
+    for y0 in [60.0, 140.0, 220.0] {
+        for (p, b) in px.iter_mut().zip(page(w, h, y0, deg, &blobs)) {
+            *p = (*p).min(b);
+        }
+        lines.push(blobs.iter().map(|&(a, b)| detected(a, b, y0, deg)).collect());
+    }
+    // The short line's ink follows the page, its one detection box leans 18.5°.
+    let (cx, cy) = (130.0, 330.0 + 130.0 * deg.to_radians().tan());
+    bar(&mut px, w, (cx, cy), (60.0, 20.0), deg);
+    lines.push(vec![word(cx, cy, 66.0, 26.0, 18.5)]);
+    let img = Gray::new(&px, w, h).unwrap();
+    let read = reader().recognize(&img, &lines).unwrap();
+    let words: Vec<&RecWord> = read.iter().flat_map(|l| &l.words).collect();
+    assert_eq!(words.len(), 16, "{read:?}");
+    let short = words.iter().find(|wd| (centre(&wd.quad)[1] - cy).abs() < 10.0).unwrap_or_else(|| panic!("{read:?}"));
+    assert!((angle_of(short) - deg).abs() < 0.1, "the short line's word is at {}°: {short:?}", angle_of(short));
+    assert!(words.iter().all(|wd| (angle_of(wd) - deg).abs() < 0.1), "{read:?}");
+}
+
+/// The reviewer's defect: the page's skew was taken from the one long line on a form, a stamp at
+/// 20°, and every two-word label was cut out and laid tilted 20° with it, which read each as one
+/// word. The labels are read level, each word on its own, and the stamp at its own angle.
+#[test]
+fn a_leaning_stamp_does_not_tilt_the_short_lines() {
+    let (w, h) = (1400usize, 900usize);
+    let mut px = vec![255u8; w * h];
+    let mut lines: Vec<Vec<RotatedRect>> = Vec::new();
+    for y in [100.0f32, 200.0, 300.0] {
+        let mut line = Vec::new();
+        for x in [150.0f32, 300.0] {
+            bar(&mut px, w, (x, y), (100.0, 20.0), 0.0);
+            line.push(word(x, y, 106.0, 26.0, 0.0));
+        }
+        lines.push(line);
+    }
+    let a = 20.0f32.to_radians();
+    let mut stamp = Vec::new();
+    for s in [0.0f32, 200.0, 400.0, 600.0, 800.0] {
+        let (x, y) = (200.0 + s * a.cos(), 450.0 + s * a.sin());
+        bar(&mut px, w, (x, y), (150.0, 20.0), 20.0);
+        stamp.push(word(x, y, 156.0, 26.0, 20.0));
+    }
+    lines.push(stamp);
+    let img = Gray::new(&px, w, h).unwrap();
+    let read = reader().recognize(&img, &lines).unwrap();
+    assert_eq!(read.iter().map(|l| l.words.len()).collect::<Vec<_>>(), [2, 2, 2, 5], "{read:?}");
+    for l in read.iter().take(3) {
+        assert!(l.words.iter().all(|wd| angle_of(wd).abs() < 0.1 && wd.snapped), "{l:?}");
+    }
+    assert!(read[3].words.iter().all(|wd| (angle_of(wd) - 20.0).abs() < 0.1), "{:?}", read[3]);
+}
+
 /// The verifier's defect: ocrs split a text line in two, the small "à" between the halves had
 /// no detection box of its own, and both halves' crops (each with its margin) read it, so the
 /// text layer said "à à Châlons". The same ink read twice is kept once.
