@@ -38,9 +38,10 @@ only `.pdf` inputs are processed. Unsupported extensions are reported as skipped
   own language (its `/Lang`) when text recognition reads that, else in English. A
   language whose model is missing is read as English, and the file's `ocr` step log
   says so (`language`, `fell_back_from`, `fallback_reason`). By default pages already
-  containing text are skipped. `--replace-ocr` reads pages again whose only text is
-  OCR text PdfCraft added earlier and replaces it (`replaced_pages`); other text is
-  kept. A file whose language can't be read at all (no models, or English asked
+  containing text are skipped. `--replace-ocr` reads pages again that have OCR text
+  PdfCraft added earlier, even beside other text, and replaces that OCR text
+  (`replaced_pages`); the other text (a header, a typed text box) stays and its words
+  aren't added again, and an OCR layer edited since is kept as it is. A file whose language can't be read at all (no models, or English asked
   for with its model missing or damaged) is a file error saying why, never a file
   with no words; nothing is downloaded or installed by the batch.
 - `--stop-on-error` stops processing after the first file error. By default the

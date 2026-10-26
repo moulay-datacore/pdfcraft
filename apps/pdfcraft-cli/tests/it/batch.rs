@@ -30,6 +30,31 @@ fn cli_batch_reports_partial_failure_and_continues_into_subfolders() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// The reviewer's gap: nothing checked that the OCR flags reach the batch. Each is an OCR
+/// setting, refused without the ocr step before any output is made, and --language is checked
+/// against the languages text recognition reads (no models needed).
+#[test]
+fn cli_batch_passes_the_ocr_flags_on() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-cli-batch-ocr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("input")).unwrap();
+    std::fs::write(dir.join("input/a.pdf"), b"%PDF-1.4").unwrap();
+    let batch = |extra: &[&str], steps: &str| {
+        Command::new(BIN).arg("batch").arg("input").arg("--root").arg(&dir).args(["--steps", steps, "--out-dir", "out"]).args(extra).output().unwrap()
+    };
+    for (flag, key) in [(&["--replace-ocr"][..], "replace_ocr"), (&["--language", "fr"], "language"), (&["--ocr-all-pages"], "skip_text_pages")] {
+        let output = batch(flag, "optimize");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success() && stderr.contains("settings need the ocr step") && stderr.contains(key), "{flag:?}: {stderr}");
+        assert!(!dir.join("out").exists(), "{flag:?}: refused before any output");
+    }
+    let output = batch(&["--language", "pl"], "ocr");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success() && stderr.contains("doesn't read the language \"pl\""), "{stderr}");
+    assert!(!dir.join("out").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn cli_batch_rejects_bad_flags_before_creating_outputs() {
     for args in [
