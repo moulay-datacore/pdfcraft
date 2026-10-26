@@ -507,9 +507,6 @@ fn a_damaged_english_model_fails_the_run_and_says_why() {
     let junk = dir.join(ENGLISH_MODEL);
     std::fs::write(&junk, b"not a model").unwrap();
     let damaged = pdfcraft_engine::ocr::Models { recognition: Some(junk), ..installed };
-    // The run's recogniser, held so that the cache keeps what it found for the picker below
-    // whatever other tests load meanwhile (it drops only recognisers no one uses).
-    let _held = pdfcraft_engine::ocr::engine_for(&damaged).unwrap();
     let mut h = recognize_dialog(scan(), Some(damaged.clone()));
     h.get_by_label("Recognize text").click();
     h.run_steps(3);
@@ -517,6 +514,11 @@ fn a_damaged_english_model_fails_the_run_and_says_why() {
     assert!(toast.starts_with("Recognize text failed") && toast.contains(ENGLISH_MODEL), "{toast}");
     let id = h.state().active_ids().unwrap().1;
     assert_eq!(h.state().session.get(id).unwrap().can_undo(), None, "nothing was added");
+    // A recogniser for these files, held so that the cache keeps it for the picker whatever
+    // other tests load meanwhile (it drops only recognisers no one uses): the run's, or one
+    // loaded again, which finds English damaged the same way. Held before the run, it would
+    // have shown English as unusable before the run was tried.
+    let _held = pdfcraft_engine::ocr::engine_for(&damaged).unwrap();
     assert!(h.state_mut().execute("ocr.recognize"));
     h.run_steps(2);
     assert!(h.query_by(|n| n.role() == Role::ComboBox && n.value().as_deref() == Some("English — couldn't be loaded")).is_some());
