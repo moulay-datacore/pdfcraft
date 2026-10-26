@@ -213,8 +213,9 @@ unapplied with a warning.
 `ocr_recognize`, `ocr_recognize_files` and the `ocr` step of `doc_batch` take `language` (`en`,
 `fr`, `de`, `es`, `it`, `pt`, `nl`; default: the document's `/Lang` when OCR reads it, else
 `en`) and `replace_ocr` (read pages again in place of the OCR text PdfCraft added before, even
-beside other text; an edited layer and other text stay); `action_run` takes `language` for its
-`recognize_text` step, and reports it per file as below. Every result names the language read
+beside other text; an edited layer, one that can't be read or isn't PdfCraft's, and other text
+stay, and a page skipped for having such a layer says which); `action_run` takes `language` for
+its `recognize_text` step, and reports it per file as below. Every result names the language read
 (`language`) and, when a language's model is missing or can't be loaded and the pages were read
 as English instead, the one asked for (`fell_back_from`) and why (`fallback_reason`); a page
 not read says why (`skipped`) and what kind of reason it is (`skip_kind`: `has_text`,

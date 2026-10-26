@@ -13,7 +13,8 @@
 //! layer records the SHA-256 digest of its content when it is written (`/PCDigest`), and an edit
 //! through Edit text marks a layer it changes (`/PCEdited true`), which also covers layers
 //! written before they had a digest. Anything else on the page, an edited layer included, is
-//! the page's own text and is never taken away.
+//! the page's own text and is never taken away; [`Kept`] says why a stream under the tag is
+//! kept.
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use sha2::{Digest, Sha256};
@@ -53,15 +54,31 @@ impl OcrLayers {
 }
 
 /// The OCR text PdfCraft added to a page: the layers still as it wrote them, which a new
-/// reading may replace, and the streams under the same tag that are no longer only that.
+/// reading may replace, and the streams under the same tag that are not (any longer) only that.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OcrText {
     /// The layers still as PdfCraft wrote them.
     pub own: OcrLayers,
-    /// The streams tagged [`OCR_TAG`] that are not (any longer) only PdfCraft's OCR text: a
-    /// word corrected since, visibly or not, or another writer's stream under the tag. They are
-    /// the page's own text, never removed.
-    pub edited: Vec<ObjRef>,
+    /// The streams tagged [`OCR_TAG`] that are not PdfCraft's OCR text as it wrote it, in content
+    /// order, each with why. They are the page's own text, never removed.
+    pub kept: Vec<(ObjRef, Kept)>,
+}
+
+/// Why a content stream tagged [`OCR_TAG`] is not PdfCraft's OCR text as it wrote it, and so is
+/// kept as the page's own text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kept {
+    /// It was changed since PdfCraft wrote it: Edit text marked it, or its content is no longer
+    /// what its digest records (a word corrected, visibly or not).
+    Edited,
+    /// Its content can't be read: it doesn't decode (damaged, or in a filter PdfCraft doesn't
+    /// decode), or decodes to more than a layer ever holds (8 MiB). What it holds is unknown.
+    Unreadable,
+    /// It holds something other than OCR text as PdfCraft writes it, and nothing records that
+    /// PdfCraft wrote it and it changed since: another program's stream under the tag (or its
+    /// digest, which PdfCraft writes as a string, is something else), or a layer from before
+    /// layers had a digest that something changed without marking it.
+    Foreign,
 }
 
 /// The page's `/Contents` as a list, read without changing anything (a direct stream, which
@@ -77,37 +94,33 @@ fn content_list(doc: &Document, page: &pdfcraft_model::Page) -> Vec<Object> {
     }
 }
 
-/// What a content stream tagged [`OCR_TAG`] holds.
-enum Tagged {
-    /// A layer still as PdfCraft wrote it: its words and the glyphs they show.
-    Own(usize, usize),
-    /// Anything else.
-    Edited,
-}
-
-/// What `o`, one of a page's content streams, is when it is tagged [`OCR_TAG`].
-fn tagged_text(doc: &Document, o: &Object) -> Option<Tagged> {
+/// What `o`, one of a page's content streams, is when it is tagged [`OCR_TAG`]: a layer still as
+/// PdfCraft wrote it, with its words and the glyphs they show, or why it isn't.
+fn tagged_text(doc: &Document, o: &Object) -> Option<Result<(usize, usize), Kept>> {
     if crate::stream_tag(doc, o).as_deref() != Some(OCR_TAG) {
         return None;
     }
     let Object::Stream(stream) = &*doc.resolve(o) else { return None };
-    Some(unedited(stream).map_or(Tagged::Edited, |(words, glyphs)| Tagged::Own(words, glyphs)))
+    Some(unedited(stream))
 }
 
 /// The words and glyphs of `stream` when it is a layer PdfCraft wrote and nothing has changed
-/// it since (see the module documentation).
-fn unedited(stream: &Stream) -> Option<(usize, usize)> {
+/// it since (see the module documentation), else why it isn't.
+fn unedited(stream: &Stream) -> Result<(usize, usize), Kept> {
     if stream.dict.contains(EDITED) {
-        return None;
+        return Err(Kept::Edited);
     }
-    let data = stream.decoded_within(MAX_LAYER).ok()?;
+    // Strictly: a layer read only in part (damaged) is not known to be one.
+    let data = stream.decoded_strict_within(MAX_LAYER).map_err(|_| Kept::Unreadable)?;
     match stream.dict.get(DIGEST) {
         // Written before layers had a digest: the operators alone tell.
         None => {}
         Some(Object::String(s)) if s.bytes == digest(&data) => {}
-        Some(_) => return None,
+        // PdfCraft wrote it, and it has changed since.
+        Some(Object::String(_)) => return Err(Kept::Edited),
+        Some(_) => return Err(Kept::Foreign),
     }
-    layer_text(&data)
+    layer_text(&data).ok_or(Kept::Foreign)
 }
 
 /// The SHA-256 digest of `data`.
@@ -176,12 +189,12 @@ fn text_on(doc: &Document, page: &pdfcraft_model::Page) -> OcrText {
         // A layer is a stream, which is always indirect: one listed directly is no layer.
         let Object::Ref(r) = o else { continue };
         match tagged_text(doc, &o) {
-            Some(Tagged::Own(words, glyphs)) => {
+            Some(Ok((words, glyphs))) => {
                 found.own.streams.push(r);
                 found.own.words = found.own.words.saturating_add(words);
                 found.own.glyphs = found.own.glyphs.saturating_add(glyphs);
             }
-            Some(Tagged::Edited) => found.edited.push(r),
+            Some(Err(why)) => found.kept.push((r, why)),
             None => {}
         }
     }
@@ -201,8 +214,9 @@ pub fn own_ocr_pages(doc: &Document) -> Vec<(usize, OcrLayers)> {
 }
 
 /// Of `pages` (0-based; each once, in order; pages past the end have none), those that have
-/// OCR text PdfCraft added, as it wrote it or edited since, with that text. One walk of the
-/// page tree, decoding only those pages' streams tagged [`OCR_TAG`].
+/// streams tagged [`OCR_TAG`], with what they are ([`OcrText`]): OCR text PdfCraft added as it
+/// wrote it, or kept, and why. One walk of the page tree, decoding only those pages' streams
+/// tagged [`OCR_TAG`].
 pub fn ocr_text_on(doc: &Document, pages: &[usize]) -> Vec<(usize, OcrText)> {
     let all = crate::page_list(doc);
     pages
@@ -211,7 +225,7 @@ pub fn ocr_text_on(doc: &Document, pages: &[usize]) -> Vec<(usize, OcrText)> {
         .collect::<std::collections::BTreeSet<usize>>()
         .into_iter()
         .filter_map(|i| Some((i, text_on(doc, all.get(i)?))))
-        .filter(|(_, t)| !t.own.is_empty() || !t.edited.is_empty())
+        .filter(|(_, t)| !t.own.is_empty() || !t.kept.is_empty())
         .collect()
 }
 
@@ -342,6 +356,12 @@ mod tests {
         for data in not_layers {
             assert_eq!(layer_text(data.as_bytes()), None, "{data:?}");
             let mut doc = page(&[(OCR_TAG, data)]);
+            // Nothing records that PdfCraft wrote it: not "edited", someone else's.
+            let text = ocr_text_on(&doc, &[0]);
+            assert!(
+                matches!(text.as_slice(), [(0, t)] if t.own.is_empty() && matches!(t.kept.as_slice(), [(_, Kept::Foreign)])),
+                "{data:?}: {text:?}"
+            );
             let before = streams(&doc);
             assert_eq!(remove(&mut doc), (0, 0), "{data:?}");
             assert_eq!(streams(&doc), before);
@@ -398,7 +418,10 @@ mod tests {
             assert_eq!(own_ocr_layers(&doc, 0).unwrap(), OcrLayers::default(), "{format}");
             assert!(own_ocr_pages(&doc).is_empty() && own_ocr_pages(&reopen(&doc)).is_empty(), "{format}");
             let text = ocr_text_on(&doc, &[0, 0, 7]);
-            assert!(matches!(text.as_slice(), [(0, t)] if t.own.is_empty() && t.edited.len() == 1), "{format}: {text:?}");
+            assert!(
+                matches!(text.as_slice(), [(0, t)] if t.own.is_empty() && matches!(t.kept.as_slice(), [(_, Kept::Edited)])),
+                "{format}: {text:?}"
+            );
             assert_eq!(remove(&mut doc), (0, 0), "{format}");
             assert_eq!(streams(&doc), after, "{format}: the correction stays");
         }
@@ -412,18 +435,19 @@ mod tests {
         let mut doc = page(&[]);
         let layer = crate::stamp(&mut doc, 0, OCR_TAG, LAYER.as_bytes().to_vec()).unwrap();
         type Change = fn(&mut Dict, &mut Vec<u8>);
-        let changes: [(&str, Change); 5] = [
-            ("a word changed", |_, data| *data = LAYER.replace("(world)", "(World)").into_bytes()),
-            ("a word deleted", |_, data| *data = LAYER.replace("30 0 0 12 120 700 Tm (world) Tj\n", "").into_bytes()),
-            ("the digest replaced", |dict, _| dict.set(DIGEST.to_vec(), Object::String(PdfString::literal(vec![0; 32])))),
-            ("the digest not a string", |dict, _| dict.set(DIGEST.to_vec(), Object::Int(1))),
-            ("marked edited", |dict, _| dict.set(EDITED.to_vec(), Object::Bool(true))),
+        let changes: [(&str, Change, Kept); 5] = [
+            ("a word changed", |_, data| *data = LAYER.replace("(world)", "(World)").into_bytes(), Kept::Edited),
+            ("a word deleted", |_, data| *data = LAYER.replace("30 0 0 12 120 700 Tm (world) Tj\n", "").into_bytes(), Kept::Edited),
+            ("the digest replaced", |dict, _| dict.set(DIGEST.to_vec(), Object::String(PdfString::literal(vec![0; 32]))), Kept::Edited),
+            // PdfCraft writes its digest as a string: this one is someone else's.
+            ("the digest not a string", |dict, _| dict.set(DIGEST.to_vec(), Object::Int(1)), Kept::Foreign),
+            ("marked edited", |dict, _| dict.set(EDITED.to_vec(), Object::Bool(true)), Kept::Edited),
         ];
-        for (what, change) in changes {
+        for (what, change, why) in changes {
             let mut changed = doc.clone();
             rewrite(&mut changed, layer, change);
             let text = ocr_text_on(&changed, &[0]);
-            assert!(matches!(text.as_slice(), [(0, t)] if t.own.is_empty() && t.edited == [layer]), "{what}: {text:?}");
+            assert!(matches!(text.as_slice(), [(0, t)] if t.own.is_empty() && t.kept == [(layer, why)]), "{what}: {text:?}");
             assert_eq!(remove(&mut changed), (0, 0), "{what}");
         }
         // Only the content counts: compressed differently, a layer is still PdfCraft's.
@@ -441,6 +465,47 @@ mod tests {
         let r = own_ocr_layers(&legacy, 0).unwrap().streams[0];
         rewrite(&mut legacy, r, |_, data| *data = LAYER.replace("(world)", "(World)").into_bytes());
         assert_eq!(counts(&own_ocr_layers(&legacy, 0).unwrap()), (1, 2));
+    }
+
+    /// The wording defect: a stream under the tag whose content couldn't be read was said to be
+    /// OCR text edited since it was added. What it holds is unknown, so it is kept, and said to be
+    /// unreadable: damaged data (which a tolerant decode reads in part), a filter nothing here
+    /// decodes, and a layer past the 8 MiB a layer is read within. One just within it is a layer,
+    /// and a layer without its digest is told by its operators (another writer's content beside
+    /// a copied tag and digest is not a layer).
+    #[test]
+    fn a_tagged_stream_that_cannot_be_read_is_kept_as_unreadable() {
+        let mut doc = page(&[]);
+        let layer = crate::stamp(&mut doc, 0, OCR_TAG, LAYER.as_bytes().to_vec()).unwrap();
+        // What the page's OCR text is with `stream` in the layer's place, and what removing takes.
+        let with = |stream: Stream| {
+            let mut changed = doc.clone();
+            changed.set(layer, Object::Stream(stream));
+            let text = ocr_text_on(&changed, &[0]).into_iter().next().map(|(_, t)| (counts(&t.own), t.kept));
+            (text, remove(&mut changed))
+        };
+        let kept = |why: Kept| (Some(((0, 0), vec![(layer, why)])), (0, 0));
+        let padded = |len: usize| {
+            let mut data = LAYER.as_bytes().to_vec();
+            data.resize(len, b' ');
+            data
+        };
+        let whole = Stream::flate(layer_dict(LAYER.as_bytes()), LAYER.as_bytes());
+        assert_eq!(with(whole.clone()), (Some(((1, 2), Vec::new())), (1, 2)), "as written, it is a layer");
+
+        let cut = Stream::from_raw(whole.dict.clone(), whole.raw.get(..whole.raw.len() / 2).unwrap_or_default().to_vec());
+        assert!(cut.decoded().is_ok_and(|d| d.len() < LAYER.len() && LAYER.as_bytes().starts_with(&d)), "read in part");
+        assert_eq!(with(cut), kept(Kept::Unreadable), "damaged");
+        let mut image = layer_dict(LAYER.as_bytes());
+        image.set(b"Filter".to_vec(), Object::name("JBIG2Decode"));
+        assert_eq!(with(Stream::from_raw(image, LAYER.as_bytes().to_vec())), kept(Kept::Unreadable), "a filter not decoded here");
+        let too_large = padded(MAX_LAYER + 1);
+        assert_eq!(with(Stream::flate(layer_dict(&too_large), &too_large)), kept(Kept::Unreadable), "too large");
+        let largest = padded(MAX_LAYER);
+        assert_eq!(with(Stream::flate(layer_dict(&largest), &largest)), (Some(((1, 2), Vec::new())), (1, 2)), "just within");
+
+        let other = b"BT /F1 9 Tf 72 700 Td (Another program) Tj ET".to_vec();
+        assert_eq!(with(Stream::flate(layer_dict(&other), &other)), kept(Kept::Foreign), "not a layer, whatever its digest");
     }
 
     /// Removing the layers leaves the rest of the page as it was, and the q/Q wrapper the first

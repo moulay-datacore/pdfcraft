@@ -1038,7 +1038,7 @@ pub fn marks_present(doc: &Document) -> Vec<MarkKind> {
 mod background;
 pub use background::page_background;
 mod ocr_layer;
-pub use ocr_layer::{OCR_TAG, OcrLayers, OcrText, ocr_text_on, own_ocr_layers, own_ocr_pages, remove_own_ocr_layers};
+pub use ocr_layer::{Kept, OCR_TAG, OcrLayers, OcrText, ocr_text_on, own_ocr_layers, own_ocr_pages, remove_own_ocr_layers};
 pub mod objects;
 pub use objects::{EditableObject, MAX_MOVE_OBJECTS, ObjectKind, ObjectTarget, editable_objects, move_objects};
 

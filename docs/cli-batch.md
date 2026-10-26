@@ -41,9 +41,11 @@ only `.pdf` inputs are processed. Unsupported extensions are reported as skipped
   containing text are skipped. `--replace-ocr` reads pages again that have OCR text
   PdfCraft added earlier, even beside other text, and replaces that OCR text
   (`replaced_pages`); the other text (a header, a typed text box) stays and its words
-  aren't added again, and an OCR layer edited since is kept as it is. A file whose language can't be read at all (no models, or English asked
-  for with its model missing or damaged) is a file error saying why, never a file
-  with no words; nothing is downloaded or installed by the batch.
+  aren't added again, and OCR text edited since, unreadable or not PdfCraft's is kept
+  as it is (the page's result says which). A file whose language can't be read at
+  all (no models, or English asked for with its model missing or damaged) is a file
+  error saying why, never a file with no words; nothing is downloaded or installed
+  by the batch.
 - `--stop-on-error` stops processing after the first file error. By default the
   remaining files continue. Earlier successful outputs stay, and unprocessed
   files are listed as skipped. A file is published only after all its steps succeed.

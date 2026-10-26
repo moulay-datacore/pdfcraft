@@ -56,9 +56,10 @@ pub struct OcrSettings {
     /// has some is read again, whatever `skip_text_pages` says, as if it weren't there, and the
     /// new words take its place in the same undoable step. A page where nothing is recognised
     /// keeps it, and so does one read as English because its language's model is missing (that
-    /// would lose its accents). Text added any other way, an OCR layer edited since included,
-    /// stays, and its words are not added again; a page skipped for its text whose OCR text was
-    /// edited says it was kept ([`SkipKind::KeptEarlierText`]).
+    /// would lose its accents). Text added any other way stays, and its words are not added
+    /// again: so does text tagged as OCR text that isn't PdfCraft's as it wrote it (edited since,
+    /// unreadable, or another program's: [`pdfcraft_edit::Kept`]), and a page skipped for its
+    /// text that has some says it was kept, and why ([`SkipKind::KeptEarlierText`]).
     pub replace_ocr: bool,
 }
 
@@ -107,7 +108,8 @@ pub enum SkipKind {
     /// It has text of its own ([`OcrSettings::skip_text_pages`]).
     HasText,
     /// Its earlier OCR text was kept rather than replaced: it was edited since PdfCraft added it
-    /// (a word corrected, visibly or not), which makes it the user's text, or the language asked
+    /// (a word corrected, visibly or not), which makes it the user's text, it couldn't be read, or
+    /// it isn't PdfCraft's ([`pdfcraft_edit::Kept`]; the reason says which), or the language asked
     /// for was read as English.
     KeptEarlierText,
     /// It couldn't be read (it didn't render, or recognition failed).
@@ -367,7 +369,7 @@ impl OcrJob {
             let existing = text_boxes(&mut r, page);
             if self.skips_for_text(page, !existing.is_empty()) {
                 let (kind, why) = self.text_skip(page, existing.len());
-                out.push(skip(kind, why));
+                out.push(skip(kind, &why));
                 continue;
             }
             let shot = r.render(RenderRequest { page, scale: self.scale(page, info), ..Default::default() });
@@ -424,19 +426,21 @@ impl OcrJob {
     }
 
     /// Why `page`, whose text shows `glyphs` glyphs, is left unread for having text
-    /// ([`OcrJob::skips_for_text`]). Replacing, OCR text PdfCraft added that was edited since is
-    /// the user's and is kept, and the result says so. Not replacing, a page whose only text is
-    /// PdfCraft's own OCR text (all the glyphs it shows are that text's) says how to read it again.
-    fn text_skip(&self, page: usize, glyphs: usize) -> (SkipKind, &'static str) {
-        match self.ocr_text.get(&page) {
-            Some(t) if self.settings.replace_ocr && !t.edited.is_empty() => {
-                (SkipKind::KeptEarlierText, "its recognized text was edited since it was added, so it was kept rather than replaced")
-            }
+    /// ([`OcrJob::skips_for_text`]). Replacing, text tagged as OCR text that isn't PdfCraft's as it
+    /// wrote it is kept, and the result says so and why ([`kept_reason`]). Not replacing, a page
+    /// whose only text is PdfCraft's own OCR text (all the glyphs it shows are that text's) says
+    /// how to read it again.
+    fn text_skip(&self, page: usize, glyphs: usize) -> (SkipKind, String) {
+        let text = self.ocr_text.get(&page);
+        if let Some(why) = text.filter(|_| self.settings.replace_ocr).and_then(|t| kept_reason(&t.kept)) {
+            return (SkipKind::KeptEarlierText, why);
+        }
+        match text {
             Some(t) if !self.settings.replace_ocr && t.own.glyphs > 0 && t.own.glyphs == glyphs => (
                 SkipKind::HasText,
-                "the page's only text is the OCR text PdfCraft added earlier; set replace_ocr to read it again and replace that text",
+                "the page's only text is the OCR text PdfCraft added earlier; set replace_ocr to read it again and replace that text".into(),
             ),
-            _ => (SkipKind::HasText, "the page already contains text"),
+            _ => (SkipKind::HasText, "the page already contains text".into()),
         }
     }
 
@@ -450,6 +454,27 @@ impl OcrJob {
         // image, and no "Downsample to" choice could ask for less.
         let fit = (SHEET / info.width.max(info.height).max(1e-3)).min(1.0);
         native.clamp(fit, wanted * fit)
+    }
+}
+
+/// Why a page's text tagged as OCR text, `kept` (each stream that isn't PdfCraft's OCR text as it
+/// wrote it, and why: [`pdfcraft_edit::Kept`]), was kept rather than replaced, in a sentence (in
+/// English: automation results show it). Each reason once; `None` when nothing was kept.
+fn kept_reason(kept: &[(ObjRef, pdfcraft_edit::Kept)]) -> Option<String> {
+    use pdfcraft_edit::Kept;
+    let why: Vec<&str> = [
+        (Kept::Edited, "was edited since it was added"),
+        (Kept::Unreadable, "could not be read (it is damaged, or too large)"),
+        (Kept::Foreign, "is not PdfCraft's own OCR text (another program's, or changed with no record of it)"),
+    ]
+    .into_iter()
+    .filter(|(kind, _)| kept.iter().any(|(_, k)| k == kind))
+    .map(|(_, why)| why)
+    .collect();
+    match why.as_slice() {
+        [] => None,
+        [one] => Some(format!("its recognized text {one}, so it was kept rather than replaced")),
+        many => Some(format!("its recognized text was kept rather than replaced: some of it {}", many.join("; some "))),
     }
 }
 
@@ -852,27 +877,84 @@ mod tests {
         assert!(s.get(id).unwrap().text_blocks(2).iter().all(|b| b.invisible), "the correction is still invisible text");
         assert_eq!(s.own_ocr_pages(id, &[]), [0, 1]);
 
-        let why = |job: &OcrJob| -> Vec<Option<(SkipKind, &'static str)>> {
-            let mut r = PageRenderer::new(job.bytes.clone(), RenderConfig::default());
-            (0..3)
-                .map(|page| {
-                    let glyphs = text_boxes(&mut r, page).len();
-                    job.skips_for_text(page, glyphs > 0).then(|| job.text_skip(page, glyphs))
-                })
-                .collect()
-        };
-        let plain = why(&s.ocr_job(id, &[], OcrSettings::default()).unwrap());
-        let has_text = |p: usize| plain[p].filter(|(kind, _)| *kind == SkipKind::HasText).map(|(_, why)| why);
+        let why = |settings: OcrSettings| skip_reasons(&s.ocr_job(id, &[], settings).unwrap());
+        let plain = why(OcrSettings::default());
+        let has_text = |p: usize| plain[p].as_ref().filter(|(kind, _)| *kind == SkipKind::HasText).map(|(_, why)| why.as_str());
         assert!(has_text(0).is_some_and(|w| w.contains("only text is the OCR text PdfCraft added") && w.contains("replace_ocr")), "{plain:?}");
         assert_eq!((has_text(1), has_text(2)), (Some("the page already contains text"), Some("the page already contains text")));
 
-        let replacing = why(&s.ocr_job(id, &[], OcrSettings { replace_ocr: true, ..Default::default() }).unwrap());
+        let replacing = why(OcrSettings { replace_ocr: true, ..Default::default() });
         assert_eq!(replacing[..2], [None, None], "pages with PdfCraft's own OCR text are read again");
-        let kept = replacing[2].unwrap();
-        assert!(kept.0 == SkipKind::KeptEarlierText && kept.1.contains("edited") && kept.1.contains("kept"), "{kept:?}");
+        let kept = (SkipKind::KeptEarlierText, "its recognized text was edited since it was added, so it was kept rather than replaced".into());
+        assert_eq!(replacing[2], Some(kept));
         // Reading every page: nothing is skipped for its text, nor said to be.
-        let all = why(&s.ocr_job(id, &[], OcrSettings { skip_text_pages: false, ..Default::default() }).unwrap());
+        let all = why(OcrSettings { skip_text_pages: false, ..Default::default() });
         assert_eq!(all, [None, None, None]);
+    }
+
+    /// Of each page of `job`, whether it is left unread for its text, and why
+    /// ([`OcrJob::skips_for_text`], [`OcrJob::text_skip`]).
+    fn skip_reasons(job: &OcrJob) -> Vec<Option<(SkipKind, String)>> {
+        let mut r = PageRenderer::new(job.bytes.clone(), RenderConfig::default());
+        (0..job.infos.len())
+            .map(|page| {
+                let glyphs = text_boxes(&mut r, page).len();
+                job.skips_for_text(page, glyphs > 0).then(|| job.text_skip(page, glyphs))
+            })
+            .collect()
+    }
+
+    /// The wording defect: text tagged as OCR text that couldn't be read (damaged, or past the
+    /// 8 MiB a layer is read within) or that another program wrote was said, replacing, to have
+    /// been edited since it was added. Each says why it was kept, a page with several reasons all
+    /// of them, and the text stays (no models needed).
+    #[test]
+    fn ocr_text_kept_for_being_unreadable_or_not_pdfcraft_s_says_why() {
+        use pdfcraft_cos::{Document, Object, Stream};
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = scan(&mut s, 4);
+        for page in 0..4 {
+            s.apply(id, Edit::AddOcrText { page, words: vec![word("Scanned", 10.0, 100.0)] }).unwrap();
+            // Text of the page's own, so it has text however its OCR text reads.
+            let note = crate::AddedText { rect: [10.0, 10.0, 100.0, 40.0], text: "note".into(), size: 9.0, ..Default::default() };
+            s.apply(id, Edit::AddText { page, text: note }).unwrap();
+        }
+        let mut doc = Document::open(s.get(id).unwrap().bytes.clone()).unwrap();
+        // Each page's layer, rewritten by `change` from its dictionary (tag and digest) and content.
+        let mut rewrite = |page: usize, change: &dyn Fn(pdfcraft_cos::Dict, Vec<u8>) -> Stream| {
+            let layer = pdfcraft_edit::own_ocr_layers(&doc, page).unwrap().streams[0];
+            let Object::Stream(stream) = &*doc.get(layer) else { panic!("{layer:?} is no stream") };
+            let mut dict = stream.dict.clone();
+            dict.remove(b"Length");
+            let stream = change(dict, stream.decoded().unwrap());
+            doc.set(layer, Object::Stream(stream));
+        };
+        rewrite(0, &|dict, data| {
+            let whole = Stream::flate(dict, &data);
+            Stream::from_raw(whole.dict.clone(), whole.raw.get(..whole.raw.len() / 2).unwrap_or_default().to_vec())
+        });
+        rewrite(1, &|dict, mut data| {
+            data.resize((8 << 20) + 1, b' ');
+            Stream::flate(dict, &data)
+        });
+        rewrite(2, &|mut dict, _| {
+            dict.remove(b"PCDigest");
+            Stream::flate(dict, b"BT /F1 9 Tf 72 700 Td (Another program) Tj ET")
+        });
+        rewrite(3, &|dict, data| Stream::flate(dict, &String::from_utf8_lossy(&data).replace("(Scanned)", "(Scanner)").into_bytes()));
+        pdfcraft_edit::stamp(&mut doc, 3, pdfcraft_edit::OCR_TAG, b"BT /F1 9 Tf 72 650 Td (Another program) Tj ET".to_vec()).unwrap();
+        let bytes = Arc::new(write_incremental(&doc, &SaveOptions::default()).unwrap());
+        let id = s.open("tagged.pdf", None, bytes, None).unwrap();
+        assert!(s.own_ocr_pages(id, &[]).is_empty(), "none of it is PdfCraft's OCR text as it wrote it");
+
+        let job = s.ocr_job(id, &[], OcrSettings { replace_ocr: true, ..Default::default() }).unwrap();
+        assert!(job.replacing.is_empty() && Arc::ptr_eq(&job.bytes, &s.get(id).unwrap().bytes), "nothing is set aside");
+        let kept = |why: &str| Some((SkipKind::KeptEarlierText, why.to_string()));
+        let unreadable = "its recognized text could not be read (it is damaged, or too large), so it was kept rather than replaced";
+        let foreign = "its recognized text is not PdfCraft's own OCR text (another program's, or changed with no record of it), so it was kept rather than replaced";
+        let both = "its recognized text was kept rather than replaced: some of it was edited since it was added; \
+                    some is not PdfCraft's own OCR text (another program's, or changed with no record of it)";
+        assert_eq!(skip_reasons(&job), [kept(unreadable), kept(unreadable), kept(foreign), kept(both)]);
     }
 
     /// A layer's digest is a string in its stream dictionary, which encryption changes on disk:

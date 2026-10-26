@@ -323,8 +323,14 @@ impl Stream {
 
     /// Decoded data, bounded by [`MAX_DECODED`]; any corruption is an error.
     pub fn decoded_strict(&self) -> Result<Vec<u8>, CosError> {
+        self.decoded_strict_within(MAX_DECODED)
+    }
+
+    /// Like [`Stream::decoded_strict`], for a stream whose decoded size has a tighter bound than
+    /// [`MAX_DECODED`]: decoding past `max` bytes is an error, as is any corruption.
+    pub fn decoded_strict_within(&self, max: usize) -> Result<Vec<u8>, CosError> {
         let decode = |chain: &[(Filter, Params)], data: &[u8], max| pdfcraft_filters::decode(chain, data, max).map(|v| (v, 0)).map_err(|e| (e, 0));
-        self.decode_chain(MAX_DECODED, decode).map(|(v, _)| v).map_err(|(e, _)| CosError::Filter(e.to_string()))
+        self.decode_chain(max, decode).map(|(v, _)| v).map_err(|(e, _)| CosError::Filter(e.to_string()))
     }
 
     /// [`Stream::decoded_strict`] bounded by `max` and counted like
@@ -634,6 +640,22 @@ mod tests {
         assert!(matches!(stream.decoded_within(2), Err(CosError::Filter(_))));
         assert_eq!(stream.decoded_within(3).unwrap(), b"abc");
         assert_eq!(stream.decoded_strict().unwrap(), b"abc");
+        assert!(matches!(stream.decoded_strict_within(2), Err(CosError::Filter(_))));
+        assert_eq!(stream.decoded_strict_within(3).unwrap(), b"abc");
+    }
+
+    /// A strict decode within a limit refuses damage the tolerant one reads past: a stream cut
+    /// short gives what came before the cut, or an error.
+    #[test]
+    fn strict_decoding_within_a_limit_refuses_damaged_data() {
+        let data: Vec<u8> = (0..2000).flat_map(|i| format!("{i} {} m {} 100 l S\n", i * 7 % 613, i * 13 % 997).into_bytes()).collect();
+        let whole = Stream::flate(Dict::new(), &data);
+        assert_eq!(whole.decoded_strict_within(data.len()).unwrap(), data);
+        let cut = Stream::from_raw(whole.dict.clone(), whole.raw.get(..whole.raw.len() / 2).unwrap_or_default().to_vec());
+        let partial = cut.decoded_within(data.len()).unwrap();
+        assert!(!partial.is_empty() && partial.len() < data.len() && data.starts_with(&partial), "{}", partial.len());
+        assert!(matches!(cut.decoded_strict_within(data.len()), Err(CosError::Filter(_))));
+        assert!(cut.decoded_strict().is_err());
     }
 
     #[test]
