@@ -108,10 +108,11 @@ pub fn first_language<'a>(tags: impl IntoIterator<Item = Option<&'a str>>) -> &'
 /// Whether a language can be read as itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Availability {
-    /// Its recognizer is installed.
+    /// Its recognizer's files are installed. A damaged one shows as ready until it is first
+    /// loaded ([`Ocr::availability`]); the run that loads it falls back and says so.
     Ready,
-    /// Its recognizer is missing (or can't be loaded) but English is installed: it would be
-    /// read as English, without its accents.
+    /// Its recognizer is missing, or failed to load ([`Ocr::availability`]), but English is
+    /// installed: it would be read as English, without its accents.
     FallsBackToEnglish,
     /// Nothing that could read it is installed.
     Missing,

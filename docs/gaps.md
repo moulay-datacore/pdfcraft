@@ -1,6 +1,6 @@
 # Where PdfCraft falls short of Acrobat Pro
 
-> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (gap 7: OCR reads French, German, Spanish, Italian, Portuguese and Dutch with their accents; estimate unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (gap 7: a damaged OCR model is found by the first run, not before; estimate unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 
 > **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (gaps 5 and 14 current state: native release Hans face via LXGW WenKai Lite; Arabic logical catalog, explicit RTL direction and mirrored stock chrome, with native/browser/IME workflows unqualified; no readiness re-estimate)
 
@@ -170,8 +170,9 @@ update the numbers.
   Apache-2.0; builds on #4659 by Francois C. N.). The Recognize Text dialog shows which languages
   are ready, read as English or not installed, and opens in the user's last pick, else the
   document's `/Lang`, else the interface language. A language whose model is missing is read as
-  English and says so before and after the run. Recognizing again can replace PdfCraft's own
-  earlier OCR text in one undo step.
+  English and says so before and after the run; a model file that is there but damaged is found
+  by the first run that tries it, which says so after. Recognizing again can replace PdfCraft's
+  own earlier OCR text in one undo step.
 - **Missing:** every other script (Cyrillic, Greek, CJK, Arabic, Hebrew, Indic); Latin with
   letters outside WinAnsi (Polish, Czech, Romanian, Turkish), which needs a text layer in a
   Unicode font first; upside-down and 90-degree lines; reliable faint text and stamps;
@@ -417,6 +418,7 @@ update the numbers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Gap 7 current state: a model file that is there but damaged is reported by the first run that tries it, not before the run. Estimate unchanged. |
 | 2026-10-25 | minor | Gap 7: OCR reads French, German, Spanish, Italian, Portuguese and Dutch with their accents (PP-OCRv6 small, Apache-2.0), with per-language state in the dialog, a remembered language, a fallback to English that is always reported, and replacing PdfCraft's own earlier OCR text. Still missing: other scripts, Latin outside WinAnsi, rotated lines, clean-up. Estimate unchanged. |
 | 2026-10-25 | minor | Gaps 5 and 14 current state: native release builds embed LXGW WenKai Lite for Simplified Chinese, while the web build has no Hans face; Arabic catalogs stay logical with explicit RTL label direction and mirrored stock chrome, while native/browser RTL input, IME and complex workflows remain unqualified. Estimates unchanged. |
 | 2026-10-19 | minor | Gap 2: a Type 0 font whose `/ToUnicode` is the name `/Identity-H` or `/Identity-V` (WSCAD) reads its codes as Unicode, so such pages have text to select, find and edit (hayro-interpret patch 44, `view.render-cid-fonts`). Estimates unchanged. |

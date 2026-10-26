@@ -212,12 +212,15 @@ unapplied with a warning.
 
 `ocr_recognize`, `ocr_recognize_files` and the `ocr` step of `doc_batch` take `language` (`en`,
 `fr`, `de`, `es`, `it`, `pt`, `nl`; default: the document's `/Lang` when OCR reads it, else
-`en`) and `replace_ocr` (read pages again in place of the OCR text PdfCraft added before; an
-edited layer and other text stay). Every result names the language read (`language`) and, when
-a language's model is missing or can't be loaded and the pages were read as English instead,
-the one asked for (`fell_back_from`) and why (`fallback_reason`). `ocr_status` lists each
-language with its reader and state (`ready`, `falls_back_to_english`, `missing`). Paths go
-through `--root` confinement as for every other tool.
+`en`) and `replace_ocr` (read pages again in place of the OCR text PdfCraft added before, even
+beside other text; an edited layer and other text stay). Every result names the language read
+(`language`) and, when a language's model is missing or can't be loaded and the pages were read
+as English instead, the one asked for (`fell_back_from`) and why (`fallback_reason`); a page
+not read says why (`skipped`) and what kind of reason it is (`skip_kind`: `has_text`,
+`kept_earlier_text` or `failed`). `ocr_status` lists each language with its reader and state
+(`ready`, `falls_back_to_english`, `missing`), judged from the files installed: a damaged file
+shows as `ready` until a run in the same process has tried it. Paths go through `--root`
+confinement as for every other tool.
 
 ## Folder batches
 
