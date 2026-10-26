@@ -96,18 +96,23 @@ impl PdfCraftApp {
         let p = progress.clone();
         // The summary is written on the worker thread: draw it in the UI's language.
         let lang = crate::i18n::current();
+        // A Recognize text step reads each file in the language Recognize Text would: the user's
+        // pick, else the file's own, else the interface's.
+        let pick = self.session.ocr_language().map(|l| l.code);
         let work = move || {
             crate::i18n::set_current(lang);
-            let (mut ok, mut failed) = (0, Vec::new());
+            let ocr = pdfcraft_engine::actions::OcrLanguage { pick, interface: Some(lang.code()) };
+            let (mut ok, mut failed, mut fallback) = (0, Vec::new(), None);
             for (i, (name, bytes)) in files.into_iter().enumerate() {
                 if let Ok(mut s) = p.lock() {
                     s.done = i;
                 }
-                let r = pdfcraft_engine::actions::run_on(&action, &name, Arc::new(bytes), |_, _| {}).and_then(|r| {
+                let r = pdfcraft_engine::actions::run_on(&action, &name, Arc::new(bytes), ocr, |_, _| {}).and_then(|r| {
                     #[cfg(not(target_arch = "wasm32"))]
                     write_result(&dir, &name, &r.bytes).map_err(|e| e.to_string())?;
                     #[cfg(target_arch = "wasm32")]
                     crate::editing::download(&name, &r.bytes)?;
+                    fallback = fallback.take().or(r.ocr_fallback);
                     Ok(())
                 });
                 match r {
@@ -121,6 +126,8 @@ impl PdfCraftApp {
             if !failed.is_empty() {
                 msg.push_str(&crate::i18n::fmt(tl!("; failed: {list}"), &[("list", &failed.join("; "))]));
             }
+            // Never silent: text read as English instead of its language says so, and why.
+            msg.push_str(&crate::ocr_ui::fallback_note(fallback.as_ref()));
             if let Ok(mut s) = p.lock() {
                 s.done = s.total;
                 s.message = Some(msg);

@@ -1035,14 +1035,14 @@ pub fn marks_present(doc: &Document) -> Vec<MarkKind> {
 mod background;
 pub use background::page_background;
 mod ocr_layer;
-pub use ocr_layer::{OCR_TAG, OcrLayers, own_ocr_layers, remove_own_ocr_layers};
+pub use ocr_layer::{OCR_TAG, OcrLayers, own_ocr_layers, own_ocr_pages, remove_own_ocr_layers};
 pub mod objects;
 pub use objects::{EditableObject, MAX_MOVE_OBJECTS, ObjectKind, ObjectTarget, editable_objects, move_objects};
 
 mod flatten;
 pub use flatten::{flatten, flatten_fill_sign};
 pub mod images;
-pub use images::{ImageChange, PageImage, change_image, page_images, reading_images, rect_to_rect, turn_about_centre, turn_by_degrees};
+pub use images::{ImageChange, PageImage, change_image, page_images, pages_images, reading_images, rect_to_rect, turn_about_centre, turn_by_degrees};
 pub mod bidi;
 pub mod indic;
 mod linebreak;

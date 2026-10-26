@@ -660,12 +660,12 @@ impl Automation {
             .iter()
             .map(|p| {
                 let mut page = match &p.skipped {
-                    Some(why) => json!({ "page": p.page + 1, "skipped": why }),
+                    Some(skip) => json!({ "page": p.page + 1, "skipped": skip.reason, "skip_kind": skip_kind(skip.kind) }),
                     None if copy => json!({ "page": p.page + 1, "words": p.words.len(), "already_on_page": p.already_on_page, "text": p.text() }),
                     None => json!({ "page": p.page + 1, "words": p.words.len(), "already_on_page": p.already_on_page }),
                 };
-                if let Some(n) = p.replaced {
-                    page["replaced_words"] = json!(n);
+                if let Some(r) = &p.replaced {
+                    page["replaced_words"] = json!(r.words);
                 }
                 page
             })
@@ -697,6 +697,15 @@ impl Automation {
             })
             .collect();
         Ok(json!({ "available": ocr::available(), "search_dirs": dirs, "languages": langs }))
+    }
+}
+
+/// Why a page was not read, as a tool result names it.
+fn skip_kind(kind: pdfcraft_engine::ocr::SkipKind) -> &'static str {
+    match kind {
+        pdfcraft_engine::ocr::SkipKind::HasText => "has_text",
+        pdfcraft_engine::ocr::SkipKind::KeptEarlierText => "kept_earlier_text",
+        pdfcraft_engine::ocr::SkipKind::Failed => "failed",
     }
 }
 
@@ -945,7 +954,7 @@ impl Automation {
                 .resolve(p, false)
                 .map_err(|e| e.to_string())
                 .and_then(|src| crate::read_input_bytes(&src).map_err(|e| e.to_string()))
-                .and_then(|bytes| run_on(&action, &name, std::sync::Arc::new(bytes), |_, _| {}));
+                .and_then(|bytes| run_on(&action, &name, std::sync::Arc::new(bytes), Default::default(), |_, _| {}));
             out.push(match result {
                 Ok(r) => {
                     let target = child(&folder, &name);

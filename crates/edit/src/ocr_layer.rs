@@ -10,7 +10,7 @@
 //! (a corrected word is drawn visibly). So a stream counts only when its operators are a layer
 //! and nothing else; anything else on the page, an edited layer included, is never taken away.
 
-use pdfcraft_cos::{Document, Object};
+use pdfcraft_cos::{Document, ObjRef, Object};
 
 use crate::EditError;
 
@@ -22,12 +22,19 @@ pub const OCR_TAG: &str = "OCR";
 const MAX_LAYER: usize = 8 * 1024 * 1024;
 
 /// PdfCraft's own OCR text on a page.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OcrLayers {
-    /// The content streams that hold it.
-    pub streams: usize,
+    /// The content streams that hold it, in content order.
+    pub streams: Vec<ObjRef>,
     /// The words in them.
     pub words: usize,
+}
+
+impl OcrLayers {
+    /// Whether the page has any.
+    pub fn is_empty(&self) -> bool {
+        self.streams.is_empty()
+    }
 }
 
 /// The page's `/Contents` as a list, read without changing anything (a direct stream, which
@@ -82,27 +89,51 @@ pub(crate) fn layer_words(data: &[u8]) -> Option<usize> {
     (closed && ops.skipped() == 0 && ops.ambiguous_images() == 0).then_some(words)
 }
 
+/// PdfCraft's own OCR text layers on `page`. Only the streams tagged [`OCR_TAG`] are decoded.
+fn layers_on(doc: &Document, page: &pdfcraft_model::Page) -> OcrLayers {
+    let mut found = OcrLayers::default();
+    for o in content_list(doc, page) {
+        // A layer is a stream, which is always indirect: one listed directly is no layer.
+        let Object::Ref(r) = o else { continue };
+        if let Some(words) = own_layer_words(doc, &o) {
+            found.streams.push(r);
+            found.words = found.words.saturating_add(words);
+        }
+    }
+    found
+}
+
 /// PdfCraft's own OCR text layers on `page` (0-based).
 pub fn own_ocr_layers(doc: &Document, page: usize) -> Result<OcrLayers, EditError> {
     let p = crate::page_list(doc).into_iter().nth(page).ok_or(EditError::NoSuchPage(page))?;
-    let mut found = OcrLayers::default();
-    for words in content_list(doc, &p).iter().filter_map(|o| own_layer_words(doc, o)) {
-        found.streams = found.streams.saturating_add(1);
-        found.words = found.words.saturating_add(words);
-    }
-    Ok(found)
+    Ok(layers_on(doc, &p))
 }
 
-/// Remove PdfCraft's own OCR text layers from `page` (0-based), with the `q … Q` wrapper the
-/// first one may have put around the page's content when nothing after it still needs it; the
-/// rest of the page is left as it is. Returns what was removed.
-pub fn remove_own_ocr_layers(doc: &mut Document, page: usize) -> Result<OcrLayers, EditError> {
-    let found = own_ocr_layers(doc, page)?;
-    if found.streams > 0 {
-        let p = crate::page_list(doc).into_iter().nth(page).ok_or(EditError::NoSuchPage(page))?;
-        crate::remove_streams(doc, &p, |doc, o| own_layer_words(doc, o).is_some())?;
+/// The pages (0-based) that have PdfCraft's own OCR text layers, in order, with the layers: one
+/// walk of the page tree, so it is cheap on a long document.
+pub fn own_ocr_pages(doc: &Document) -> Vec<(usize, OcrLayers)> {
+    crate::page_list(doc).iter().enumerate().map(|(i, p)| (i, layers_on(doc, p))).filter(|(_, l)| !l.is_empty()).collect()
+}
+
+/// Remove PdfCraft's own OCR text layers from each of `pages` (0-based), with the `q … Q`
+/// wrapper the first one may have put around the page's content when nothing after it still
+/// needs it; the rest of each page is left as it is. One walk of the page tree. Returns what
+/// was removed, for each page that had some.
+pub fn remove_own_ocr_layers(doc: &mut Document, pages: &[usize]) -> Result<Vec<(usize, OcrLayers)>, EditError> {
+    let all = crate::page_list(doc);
+    crate::check(pages, all.len())?;
+    let mut removed = Vec::new();
+    // Each page once, in order.
+    for i in pages.iter().copied().collect::<std::collections::BTreeSet<usize>>() {
+        let Some(p) = all.get(i) else { continue };
+        let found = layers_on(doc, p);
+        if found.is_empty() {
+            continue;
+        }
+        crate::remove_streams(doc, p, |_, o| matches!(o, Object::Ref(r) if found.streams.contains(r)))?;
+        removed.push((i, found));
     }
-    Ok(found)
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -150,6 +181,18 @@ mod tests {
         doc
     }
 
+    /// The streams and words of `layers`.
+    fn counts(layers: &OcrLayers) -> (usize, usize) {
+        (layers.streams.len(), layers.words)
+    }
+
+    /// Remove the layers of page 0; the streams and words removed.
+    fn remove(doc: &mut Document) -> (usize, usize) {
+        let removed = remove_own_ocr_layers(doc, &[0]).unwrap();
+        assert!(removed.iter().all(|(page, l)| *page == 0 && !l.is_empty()), "{removed:?}");
+        removed.first().map_or((0, 0), |(_, l)| counts(l))
+    }
+
     /// The page's decoded content streams, in order, after a save and reopen.
     fn streams(doc: &Document) -> Vec<String> {
         let doc = Document::open(Arc::new(write_incremental(doc, &SaveOptions::default()).unwrap())).unwrap();
@@ -170,7 +213,7 @@ mod tests {
         // A layer whose words were all deleted is still a layer.
         assert_eq!(layer_words(b"/OCR BMC\nq\nBT\n3 Tr\n/PCHelv 1 Tf\nET\nQ\nEMC\n"), Some(0));
         let doc = page(&[("", "BT /F1 9 Tf 72 720 Td (Real text) Tj ET"), (OCR_TAG, LAYER), (OCR_TAG, OLD_LAYER)]);
-        assert_eq!(own_ocr_layers(&doc, 0).unwrap(), OcrLayers { streams: 2, words: 3 });
+        assert_eq!(counts(&own_ocr_layers(&doc, 0).unwrap()), (2, 3));
         assert_eq!(own_ocr_layers(&doc, 1), Err(EditError::NoSuchPage(1)));
     }
 
@@ -197,12 +240,12 @@ mod tests {
             assert_eq!(layer_words(data.as_bytes()), None, "{data:?}");
             let mut doc = page(&[(OCR_TAG, data)]);
             let before = streams(&doc);
-            assert_eq!(remove_own_ocr_layers(&mut doc, 0).unwrap(), OcrLayers::default(), "{data:?}");
+            assert_eq!(remove(&mut doc), (0, 0), "{data:?}");
             assert_eq!(streams(&doc), before);
         }
         // A layer without the tag is someone else's.
         let mut doc = page(&[("", LAYER), ("HeaderFooter", OLD_LAYER)]);
-        assert_eq!(remove_own_ocr_layers(&mut doc, 0).unwrap(), OcrLayers::default());
+        assert_eq!(remove(&mut doc), (0, 0));
         assert_eq!(streams(&doc).len(), 2);
     }
 
@@ -215,7 +258,7 @@ mod tests {
         crate::stamp(&mut doc, 0, OCR_TAG, LAYER.as_bytes().to_vec()).unwrap();
         let stamped = streams(&doc);
         assert!(stamped.len() > 2 && stamped.iter().any(|s| s == LAYER), "{stamped:?}");
-        assert_eq!(remove_own_ocr_layers(&mut doc, 0).unwrap(), OcrLayers { streams: 1, words: 2 });
+        assert_eq!(remove(&mut doc), (1, 2));
         assert_eq!(streams(&doc), [original], "the content list is back to what it was");
 
         // Content drawn after the layer stays, and so does the wrapper it relies on.
@@ -223,7 +266,7 @@ mod tests {
         crate::stamp(&mut doc, 0, OCR_TAG, LAYER.as_bytes().to_vec()).unwrap();
         crate::stamp(&mut doc, 0, "Probe", b"q 0 0 10 10 re f Q\n".to_vec()).unwrap();
         let before = streams(&doc);
-        remove_own_ocr_layers(&mut doc, 0).unwrap();
+        remove(&mut doc);
         let after = streams(&doc);
         let without: Vec<&String> = before.iter().filter(|s| s.as_str() != LAYER).collect();
         assert_eq!(after.iter().collect::<Vec<_>>(), without);
@@ -232,9 +275,53 @@ mod tests {
         // Old- and new-format layers beside an edited one: only the edited one stays.
         let edited = LAYER.replace("(world) Tj", "(world) Tj 0 Tr (shown) Tj");
         let mut doc = page(&[("", original), (OCR_TAG, OLD_LAYER), (OCR_TAG, &edited), (OCR_TAG, LAYER)]);
-        assert_eq!(remove_own_ocr_layers(&mut doc, 0).unwrap(), OcrLayers { streams: 2, words: 3 });
+        assert_eq!(remove(&mut doc), (2, 3));
         assert_eq!(streams(&doc), [original.to_string(), edited]);
         assert_eq!(own_ocr_layers(&doc, 0).unwrap(), OcrLayers::default());
+    }
+
+    /// The reviewer's defect: listing the pages with OCR text walked the page tree once for every
+    /// page, so opening Recognize Text on a 4000-page scan froze the app for most of a minute.
+    /// Finding them, and removing them from many pages, is one walk; the layers' streams are
+    /// named, so a later change to the page can be told apart.
+    #[test]
+    fn layers_on_many_pages_are_found_and_removed_in_one_walk() {
+        const PAGES: usize = 5000;
+        let mut doc = page(&[("", "BT /F1 9 Tf (p) Tj ET")]);
+        let first = crate::page_list(&doc).remove(0);
+        let content = first.dict.get(b"Contents").cloned().unwrap();
+        let pages_ref = match doc.get(first.obj).as_dict().and_then(|d| d.get(b"Parent")) {
+            Some(Object::Ref(r)) => *r,
+            other => panic!("{other:?}"),
+        };
+        let mut kids = vec![Object::Ref(first.obj)];
+        for _ in 1..PAGES {
+            let mut d = Dict::new();
+            d.set(b"Type".to_vec(), Object::name("Page"));
+            d.set(b"Parent".to_vec(), Object::Ref(pages_ref));
+            d.set(b"Contents".to_vec(), content.clone());
+            kids.push(Object::Ref(doc.add(Object::Dict(d))));
+        }
+        doc.update_dict(pages_ref, |d| {
+            d.set(b"Kids".to_vec(), Object::Array(kids));
+            d.set(b"Count".to_vec(), Object::Int(PAGES as i64));
+        })
+        .unwrap();
+        let mut layered = Vec::new();
+        for page in [0, 2500, PAGES - 1] {
+            layered.push(crate::stamp(&mut doc, page, OCR_TAG, LAYER.as_bytes().to_vec()).unwrap());
+        }
+        let started = std::time::Instant::now();
+        let found = own_ocr_pages(&doc);
+        assert_eq!(found.iter().map(|(p, l)| (*p, l.words)).collect::<Vec<_>>(), [(0, 2), (2500, 2), (PAGES - 1, 2)]);
+        assert_eq!(found.iter().flat_map(|(_, l)| l.streams.clone()).collect::<Vec<_>>(), layered);
+        let all: Vec<usize> = (0..PAGES).rev().collect();
+        let removed = remove_own_ocr_layers(&mut doc, &all).unwrap();
+        assert_eq!(removed, found, "each page once, in order");
+        assert!(own_ocr_pages(&doc).is_empty());
+        // Quadratic, this took minutes; linear, well under a second in a release build.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+        assert_eq!(remove_own_ocr_layers(&mut doc, &[PAGES]), Err(EditError::NoSuchPage(PAGES)));
     }
 
     /// The check reads untrusted content: every cut of a layer, and bytes that are no content at

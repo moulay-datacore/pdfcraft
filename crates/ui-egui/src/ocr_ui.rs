@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use egui::{Align, Layout};
 use pdfcraft_engine::DocId;
-use pdfcraft_engine::ocr::{Availability, Fallback, FallbackReason, Language, Models, Ocr, OcrOutcome, OcrSettings};
+use pdfcraft_engine::ocr::{Availability, Fallback, FallbackReason, Language, Models, Ocr, OcrOutcome, OcrSettings, SkipKind};
 
 use crate::theme::{self, Tokens};
 use crate::{PdfCraftApp, widgets};
@@ -251,7 +251,7 @@ fn language_label(language: &Language, availability: Availability) -> String {
 
 /// What the result adds when a language was read as English instead ("; read as English: the
 /// French model isn't installed"); empty when it was read as itself.
-fn fallback_note(fallback: Option<&Fallback>) -> String {
+pub(crate) fn fallback_note(fallback: Option<&Fallback>) -> String {
     let Some(f) = fallback else { return String::new() };
     let name = tl!(f.from.name);
     match &f.reason {
@@ -662,11 +662,16 @@ impl PdfCraftApp {
                 return;
             }
         };
-        let found = &outcome.pages;
+        // A page whose earlier OCR text changed while it was read again (a word corrected, pages
+        // inserted or moved) keeps it: replacing would remove text the run never read, or stack a
+        // second layer.
+        let stale = self.session.stale_replacements(doc, &outcome.pages);
+        let found: Vec<pdfcraft_engine::ocr::OcrPage> = outcome.pages.iter().filter(|p| !stale.contains(&p.page)).cloned().collect();
         let read = found.iter().filter(|p| p.skipped.is_none()).count();
-        let skipped = found.len() - read;
-        let replaced = outcome.replaced_pages();
-        match self.session.apply_ocr(doc, found) {
+        let skipped = |kind: SkipKind| found.iter().filter(|p| p.skipped.as_ref().is_some_and(|s| s.kind == kind)).count();
+        let (has_text, kept, unread) = (skipped(SkipKind::HasText), skipped(SkipKind::KeptEarlierText), skipped(SkipKind::Failed));
+        let replaced = found.iter().filter(|p| p.replaced.is_some() && !p.words.is_empty()).count();
+        match self.session.apply_ocr(doc, &found) {
             Ok(words) => {
                 if let Some(info) = self.session.get(doc).map(|d| d.info.clone())
                     && let Some(view) = self.views.iter_mut().find(|v| v.id == doc)
@@ -691,12 +696,30 @@ impl PdfCraftApp {
                         crate::i18n::fmt(tl!("; replaced the earlier recognized text on {n} pages"), &[("n", &replaced.to_string())])
                     });
                 }
-                if skipped > 0 {
-                    msg.push_str(&if skipped == 1 {
-                        crate::i18n::fmt(tl!("; 1 page already had text"), &[])
-                    } else {
-                        crate::i18n::fmt(tl!("; {n} pages already had text"), &[("n", &skipped.to_string())])
-                    });
+                // Both forms are translated where they are written, so the catalog check sees them.
+                let count = |n: usize, one: &str, many: &str| {
+                    if n == 1 { crate::i18n::fmt(one, &[]) } else { crate::i18n::fmt(many, &[("n", &n.to_string())]) }
+                };
+                if has_text > 0 {
+                    msg.push_str(&count(has_text, tl!("; 1 page already had text"), tl!("; {n} pages already had text")));
+                }
+                if unread > 0 {
+                    msg.push_str(&count(unread, tl!("; 1 page couldn't be read"), tl!("; {n} pages couldn't be read")));
+                }
+                // Why is in the fallback note that follows.
+                if kept > 0 {
+                    msg.push_str(&count(
+                        kept,
+                        tl!("; kept the earlier recognized text on 1 page"),
+                        tl!("; kept the earlier recognized text on {n} pages"),
+                    ));
+                }
+                if !stale.is_empty() {
+                    msg.push_str(&count(
+                        stale.len(),
+                        tl!("; 1 page was left as it was: its recognized text changed during the run"),
+                        tl!("; {n} pages were left as they were: their recognized text changed during the run"),
+                    ));
                 }
                 // Never silent: a language read as English says so, and why.
                 msg.push_str(&fallback_note(outcome.fallback.as_ref()));
@@ -949,10 +972,14 @@ mod tests {
         let word = || pdfcraft_engine::ocr::PlacedWord { text: "Deja".into(), origin: [72.0, 700.0], across: [60.0, 0.0], up: [0.0, 12.0] };
         let french = pdfcraft_engine::ocr::language("fr").unwrap();
         let set_interface = interface;
-        let toast = |interface: &str, fallback: Option<pdfcraft_engine::ocr::Fallback>, replaced: Option<usize>| {
+        let toast = |interface: &str, fallback: Option<pdfcraft_engine::ocr::Fallback>, replace: bool| {
             let mut app = app_with(scan());
             set_interface(&mut app, interface);
             let id = app.active_ids().unwrap().1;
+            if replace {
+                app.session.apply(id, Edit::AddOcrText { page: 0, words: vec![word(), word()] }).unwrap();
+            }
+            let replaced = app.session.own_ocr_text(id, &[0]).remove(&0);
             let page = pdfcraft_engine::ocr::OcrPage { page: 0, words: vec![word()], already_on_page: 0, skipped: None, replaced };
             let result = OcrOutcome { pages: vec![page], language: pdfcraft_engine::ocr::ENGLISH, fallback };
             let progress = Arc::new(Mutex::new(OcrProgress { done: 1, total: 1, result: Some(Ok(result)), cancel: false }));
@@ -960,19 +987,79 @@ mod tests {
             app.poll_ocr();
             app.toast.take().map(|t| t.0).unwrap_or_default()
         };
-        assert_eq!(toast("en", None, None), "Recognized 1 word on 1 page");
+        assert_eq!(toast("en", None, false), "Recognized 1 word on 1 page");
         let missing = || Some(pdfcraft_engine::ocr::Fallback { from: french, reason: FallbackReason::NotInstalled });
-        assert_eq!(toast("en", missing(), None), "Recognized 1 word on 1 page; read as English: the French model isn't installed");
+        assert_eq!(toast("en", missing(), false), "Recognized 1 word on 1 page; read as English: the French model isn't installed");
         assert_eq!(
-            toast("fr", missing(), None),
+            toast("fr", missing(), false),
             "1 mot reconnu sur 1 page; lu comme de l'anglais : le modèle « Français » n'est pas installé",
             "in the interface's language"
         );
         let damaged = Some(pdfcraft_engine::ocr::Fallback { from: french, reason: FallbackReason::Unusable("x".repeat(5_000)) });
-        let said = toast("en", damaged, None);
+        let said = toast("en", damaged, false);
         assert!(said.starts_with("Recognized 1 word on 1 page; read as English: the French model couldn't be loaded (xxx"), "{said}");
         assert!(said.len() < 400, "a long reason is cut: {} bytes", said.len());
-        assert_eq!(toast("en", None, Some(3)), "Recognized 1 word on 1 page; replaced the earlier recognized text on 1 page");
+        assert_eq!(toast("en", None, true), "Recognized 1 word on 1 page; replaced the earlier recognized text on 1 page");
+    }
+
+    /// The reviewer's defect: every page not read was "already had text", whether it had text, its
+    /// earlier OCR text was kept (read as English instead), or it couldn't be read; and a page
+    /// whose OCR text changed while it was read again had it replaced all the same. Each is said
+    /// as what it is, and the changed page is left as it was.
+    #[test]
+    fn the_result_says_why_each_page_was_not_read() {
+        let word = |text: &str| pdfcraft_engine::ocr::PlacedWord { text: text.into(), origin: [72.0, 700.0], across: [60.0, 0.0], up: [0.0, 12.0] };
+        let mut app = app_with(Session::new().create_blank(595.0, 842.0, 6).unwrap().to_vec());
+        let id = app.active_ids().unwrap().1;
+        app.session.apply(id, Edit::AddOcrText { page: 3, words: vec![word("earlier")] }).unwrap();
+        app.session.apply(id, Edit::AddOcrText { page: 4, words: vec![word("kept")] }).unwrap();
+        let had = app.session.own_ocr_text(id, &[]);
+        // Page 3's OCR text changes while the run is out: a word is added to it.
+        app.session.apply(id, Edit::AddOcrText { page: 3, words: vec![word("added")] }).unwrap();
+        let skip = |page: usize, kind: SkipKind| pdfcraft_engine::ocr::OcrPage {
+            page,
+            words: Vec::new(),
+            already_on_page: 0,
+            skipped: Some(pdfcraft_engine::ocr::Skip { kind, reason: String::new() }),
+            replaced: None,
+        };
+        let read = |page: usize, text: &str| pdfcraft_engine::ocr::OcrPage {
+            page,
+            words: vec![word(text)],
+            already_on_page: 0,
+            skipped: None,
+            replaced: had.get(&page).cloned(),
+        };
+        let pages = vec![
+            skip(0, SkipKind::HasText),
+            skip(1, SkipKind::HasText),
+            skip(2, SkipKind::Failed),
+            read(3, "new"),
+            skip(4, SkipKind::KeptEarlierText),
+            read(5, "fresh"),
+        ];
+        let fallback =
+            Some(pdfcraft_engine::ocr::Fallback { from: pdfcraft_engine::ocr::language("fr").unwrap(), reason: FallbackReason::NotInstalled });
+        let result = OcrOutcome { pages, language: pdfcraft_engine::ocr::ENGLISH, fallback };
+        let progress = Arc::new(Mutex::new(OcrProgress { done: 6, total: 6, result: Some(Ok(result)), cancel: false }));
+        app.ocr_run = Some(OcrRun { doc: id, progress, automatic: None });
+        app.poll_ocr();
+        assert_eq!(
+            app.toast.take().map(|t| t.0).unwrap_or_default(),
+            "Recognized 1 word on 1 page; 2 pages already had text; 1 page couldn't be read; kept the earlier recognized text on 1 page; \
+             1 page was left as it was: its recognized text changed during the run; read as English: the French model isn't installed"
+        );
+        let bytes = app.session.get(id).unwrap().bytes.clone();
+        let mut r = pdfcraft_render::PageRenderer::new(bytes, Default::default());
+        let mut text = |page: usize| {
+            let t = r.render(pdfcraft_render::RenderRequest { page, kind: pdfcraft_render::RequestKind::Text, scale: 1.0, ..Default::default() });
+            let mut words: Vec<String> = t.text.map(|t| t.plain_text()).unwrap_or_default().split_whitespace().map(String::from).collect();
+            words.sort();
+            words
+        };
+        assert_eq!(text(3), ["added", "earlier"], "the changed page keeps its text, and gets none of the run's");
+        assert_eq!(text(4), ["kept"]);
+        assert_eq!(text(5), ["fresh"]);
     }
 
     /// Edit reads a scanned page in the document's language, so it is left alone only when

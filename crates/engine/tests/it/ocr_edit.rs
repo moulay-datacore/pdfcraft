@@ -123,7 +123,7 @@ fn an_edited_ocr_layer_is_not_replaced() {
     assert_eq!(s.own_ocr_pages(id, &[]), [0]);
     s.apply(id, Edit::EditTextBlock { page: 0, block: 1, text: "Jane".into(), style: Default::default() }).unwrap();
     assert_eq!(s.own_ocr_pages(id, &[]), Vec::<usize>::new(), "the edited layer is the user's now");
-    s.apply(id, Edit::ReplaceOcrText { page: 0, words: vec![word("Again", 10.0, 40.0, 20.0)] }).unwrap();
+    s.apply(id, Edit::ReplaceOcrText { page: 0, words: vec![word("Again", 10.0, 40.0, 20.0)], replaces: Vec::new() }).unwrap();
     let texts: Vec<String> = s.get(id).unwrap().text_blocks(0).iter().map(|b| b.text.clone()).collect();
     for kept in ["EMPLOYEE NAME", "Jane", "Again"] {
         assert!(texts.iter().any(|t| t == kept), "{kept:?} in {texts:?}");

@@ -1653,6 +1653,12 @@
 	{words} on {pages}	{words} sur {pages}
 	; 1 page already had text	; 1 page contenait déjà du texte
 	; {n} pages already had text	; {n} pages contenaient déjà du texte
+	; 1 page couldn't be read	; 1 page n'a pas pu être lue
+	; {n} pages couldn't be read	; {n} pages n'ont pas pu être lues
+	; kept the earlier recognized text on 1 page	; texte reconnu auparavant conservé sur 1 page
+	; kept the earlier recognized text on {n} pages	; texte reconnu auparavant conservé sur {n} pages
+	; 1 page was left as it was: its recognized text changed during the run	; 1 page laissée telle quelle : son texte reconnu a changé pendant la reconnaissance
+	; {n} pages were left as they were: their recognized text changed during the run	; {n} pages laissées telles quelles : leur texte reconnu a changé pendant la reconnaissance
 	Recognized {w} words in 1 file	{w} mots reconnus dans 1 fichier
 	Recognized {w} words in {n} files	{w} mots reconnus dans {n} fichiers
 	; failed: {list}	; échecs : {list}

@@ -1744,9 +1744,13 @@ pub enum Edit {
     /// Scan & OCR ▸ Recognize text, reading a page again ([`ocr::OcrSettings::replace_ocr`]):
     /// PdfCraft's own earlier OCR text on `page` ([`pdfcraft_edit::own_ocr_layers`]) is removed
     /// and `words` put there instead. The rest of the page, an edited OCR layer included, stays.
+    /// `replaces` names the content streams of that text when the page was read; if the page's
+    /// OCR text is no longer exactly those (it changed while the page was being read), the edit
+    /// fails and nothing changes.
     ReplaceOcrText {
         page: usize,
         words: Vec<pdfcraft_ocr::PlacedWord>,
+        replaces: Vec<pdfcraft_cos::ObjRef>,
     },
     /// Edit a PDF ▸ Edit text: replace the text of line `line` (from `Document::text_lines`) on
     /// `page`, in its own font when it can show it, else in Helvetica.
@@ -2790,8 +2794,15 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::AddOcrText { page, words } => {
             pdfcraft_edit::stamp(doc, *page, pdfcraft_edit::OCR_TAG, pdfcraft_ocr::text_layer(words))?;
         }
-        Edit::ReplaceOcrText { page, words } => {
-            pdfcraft_edit::remove_own_ocr_layers(doc, *page)?;
+        Edit::ReplaceOcrText { page, words, replaces } => {
+            let removed: Vec<pdfcraft_cos::ObjRef> =
+                pdfcraft_edit::remove_own_ocr_layers(doc, &[*page])?.into_iter().flat_map(|(_, l)| l.streams).collect();
+            if removed != *replaces {
+                return Err(EditError::Invalid(format!(
+                    "the recognized text on page {} changed while it was being read again; run Recognize text again",
+                    page.saturating_add(1)
+                )));
+            }
             pdfcraft_edit::stamp(doc, *page, pdfcraft_edit::OCR_TAG, pdfcraft_ocr::text_layer(words))?;
         }
         Edit::EditPageImage { page, index, change } => {

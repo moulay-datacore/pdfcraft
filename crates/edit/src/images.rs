@@ -222,7 +222,24 @@ impl ImageState {
 /// The images and Form artwork page `page` (0-based) draws, in drawing order.
 /// Forms stay intact: no traversal or rewriting of their internal objects is needed.
 pub fn page_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, EditError> {
-    let p = page_of(doc, page)?;
+    images_on(doc, &page_of(doc, page)?)
+}
+
+/// [`page_images`] for each of `pages` (0-based), in one walk of the page tree, so asking about
+/// every page of a long document stays cheap. A page that isn't there, or whose images can't be
+/// read, is left out.
+pub fn pages_images(doc: &Document, pages: &[usize]) -> Vec<(usize, Vec<PageImage>)> {
+    let wanted: std::collections::BTreeSet<usize> = pages.iter().copied().collect();
+    pdfcraft_model::pages(doc)
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| wanted.contains(i))
+        .filter_map(|(i, p)| images_on(doc, p).ok().map(|images| (i, images)))
+        .collect()
+}
+
+/// [`page_images`] of a page already found.
+fn images_on(doc: &Document, p: &pdfcraft_model::Page) -> Result<Vec<PageImage>, EditError> {
     let xo = xobjects(doc, &p.dict);
     let mut out = Vec::new();
     // The streams are one stream in pieces, so the graphics state and operators carry over.

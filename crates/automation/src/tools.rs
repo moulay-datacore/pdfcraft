@@ -44,7 +44,7 @@ fn ocr_language() -> Value {
 fn replace_ocr() -> Value {
     json!({
         "type": "boolean",
-        "description": "Replace the OCR text PdfCraft added earlier (default false): it doesn't count as the page's text, so such a page is read again and the new text takes its place, in the same undoable step. A page where nothing is recognised, or that would be read as English instead of the language asked for, keeps it. Other text, an OCR layer edited since included, is kept."
+        "description": "Replace the OCR text PdfCraft added earlier (default false): a page that has some is read again, whatever skip_text_pages says, and the new text takes its place, in the same undoable step. A page where nothing is recognised, or that would be read as English instead of the language asked for (skip_kind kept_earlier_text), keeps it. Other text on the page, an OCR layer edited since included, is kept, and its words are not added again."
     })
 }
 
@@ -1231,7 +1231,7 @@ pub fn tools() -> Vec<ToolDef> {
             )),
         t("js_enabled", "JavaScript on or off", "Preferences ▸ JavaScript ▸ Enable Acrobat JavaScript: set it with `enabled`, or read it. With JavaScript off, field scripts other than Acrobat's AF calls don't run.")
             .with(schema(json!({ "enabled": { "type": "boolean" } }), &[])),
-        t("ocr_recognize", "Recognize text (OCR)", "Scan & OCR ▸ Recognize text: render pages, read the words in them and add them as invisible text over the page image, so scanned pages become searchable and selectable (a searchable image; the image is not changed). Pages are read in one language (see language); English is read without accents, the others with theirs. A language whose model isn't installed is read as English instead, and the result says so: language is the language read, fell_back_from the one asked for and fallback_reason why (both null otherwise). Pages that already have text are skipped unless skip_text_pages is false; then pictures on those pages are read too, and recognised words that the page's own text already has (an earlier OCR layer included) are left out and counted as already_on_page. replace_ocr reads pages again whose earlier OCR text PdfCraft added and replaces that text (replaced_words per page; replaced_pages in all). Returns each page's recognised text (left out when the document's security doesn't allow copying), word count or why it was skipped. Needs the OCR models (ocr_status). Undoable as one step.")
+        t("ocr_recognize", "Recognize text (OCR)", "Scan & OCR ▸ Recognize text: render pages, read the words in them and add them as invisible text over the page image, so scanned pages become searchable and selectable (a searchable image; the image is not changed). Pages are read in one language (see language); English is read without accents, the others with theirs. A language whose model isn't installed is read as English instead, and the result says so: language is the language read, fell_back_from the one asked for and fallback_reason why (both null otherwise). Pages that already have text are skipped unless skip_text_pages is false; then pictures on those pages are read too, and recognised words that the page's own text already has (an earlier OCR layer included) are left out and counted as already_on_page. replace_ocr reads pages again whose earlier OCR text PdfCraft added and replaces that text (replaced_words per page; replaced_pages in all). Returns each page's recognised text (left out when the document's security doesn't allow copying), word count or why it was skipped (skipped, and skip_kind: has_text, kept_earlier_text or failed). Needs the OCR models (ocr_status). Undoable as one step.")
             .cmd("ocr.recognize")
             .with(schema(
                 json!({
@@ -1257,7 +1257,7 @@ pub fn tools() -> Vec<ToolDef> {
                 }),
                 &["paths", "folder"],
             )),
-        t("ocr_status", "OCR status", "Whether text recognition is available (its models are installed: release packages include them; a source build fetches them with `cargo xtask models`; PDFCRAFT_MODELS overrides), where it looks for them, and the languages it reads, each with its reader and its state: ready, falls_back_to_english (its model is missing or can't be loaded, so it would be read as English, without accents) or missing.")
+        t("ocr_status", "OCR status", "Whether text recognition is available (its models are installed: release packages include them; a source build fetches them with `cargo xtask models`; PDFCRAFT_MODELS overrides), where it looks for them, and the languages it reads, each with its reader and its state: ready, falls_back_to_english (its model is missing, so it would be read as English, without accents) or missing. The state comes from the files installed: a model file that is there but damaged shows as ready until a run in the same process has tried to load it; that run's result then says it fell back (fell_back_from, fallback_reason).")
             .ro()
             .cmd("ocr.recognize")
             .with(schema(json!({}), &[])),

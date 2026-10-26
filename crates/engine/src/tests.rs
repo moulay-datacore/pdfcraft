@@ -4569,6 +4569,60 @@ fn recognize_text_reads_french_accents() {
     assert!(!text.contains('?'), "{text}");
 }
 
+/// The reviewer's defect: the Action Wizard's Recognize text step read every file in English
+/// (or its /Lang), whatever the user had picked in Recognize Text or the interface's language,
+/// so "Optimize Scanned Documents" lost a French scan's accents. It reads the pick, else the
+/// file's /Lang, else the interface language (needs the accented-Latin model; skipped without).
+#[test]
+fn the_recognize_text_step_of_an_action_reads_the_chosen_language() {
+    let fr = ocr::language("fr").unwrap();
+    if ocr::availability(fr) != ocr::Availability::Ready || ocr::availability(ocr::ENGLISH) != ocr::Availability::Ready {
+        eprintln!("skipped: the French and English recognition models are not installed");
+        return;
+    }
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let id = synthetic_scan_of(&mut s, "Le médecin à l'hôpital");
+    let scan = s.get(id).unwrap().bytes.clone();
+    let optimize = actions::builtin().into_iter().find(|a| a.name == "Optimize Scanned Documents").unwrap();
+    let read = |ocr: actions::OcrLanguage| {
+        let r = actions::run_on(&optimize, "scan.pdf", scan.clone(), ocr, |_, _| {}).unwrap();
+        let mut t = Session::new();
+        let id = t.open("out.pdf", None, r.bytes.clone(), None).unwrap();
+        (page_texts(&t, id)[0].clone(), r.log, r.ocr_fallback)
+    };
+    let (text, log, fallback) = read(actions::OcrLanguage { pick: Some("fr"), interface: None });
+    assert!(text.contains("médecin") && text.contains("hôpital") && fallback.is_none(), "{text:?} {log:?}");
+    assert!(log.iter().any(|l| l.contains("in French")), "{log:?}");
+    let (text, ..) = read(actions::OcrLanguage { pick: None, interface: Some("fr-CA") });
+    assert!(text.contains("médecin"), "the interface's language: {text:?}");
+    let (text, log, _) = read(actions::OcrLanguage::default());
+    assert!(
+        !text.contains("médecin") && log.iter().any(|l| l.contains("in English")),
+        "automation: the file's language, else English: {text:?} {log:?}"
+    );
+}
+
+/// An action's Recognize text step that reads a file as English instead of its language says
+/// so in its result, for the Action Wizard to show (needs the English models without the
+/// accented-Latin one; skipped otherwise).
+#[test]
+fn an_action_says_when_it_read_a_file_as_english() {
+    let fr = ocr::language("fr").unwrap();
+    if ocr::availability(fr) != ocr::Availability::FallsBackToEnglish {
+        eprintln!("skipped: needs the English models without the accented-Latin one");
+        return;
+    }
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let id = synthetic_scan_of(&mut s, "Le médecin");
+    let scan = s.get(id).unwrap().bytes.clone();
+    let optimize = actions::builtin().into_iter().find(|a| a.name == "Optimize Scanned Documents").unwrap();
+    let r = actions::run_on(&optimize, "scan.pdf", scan.clone(), actions::OcrLanguage { pick: Some("fr"), interface: None }, |_, _| {}).unwrap();
+    assert_eq!(r.ocr_fallback.as_ref().map(|f| (f.from.code, &f.reason)), Some(("fr", &ocr::FallbackReason::NotInstalled)), "{:?}", r.log);
+    assert!(r.log.iter().any(|l| l.contains("in English (read as English instead of French)")), "{:?}", r.log);
+    let r = actions::run_on(&optimize, "scan.pdf", scan, actions::OcrLanguage::default(), |_, _| {}).unwrap();
+    assert!(r.ocr_fallback.is_none(), "English is read as itself");
+}
+
 /// A language whose model is missing is read as English, and the result says so; one whose
 /// model is damaged too, with why. English never falls back (needs the English models; skipped
 /// without them).
@@ -4608,7 +4662,8 @@ fn a_language_without_its_model_is_read_as_english_and_says_so() {
     let ocr = ocr::engine_for(&english_only).unwrap();
     let job = s.ocr_job(id, &[], ocr::OcrSettings { language: Some("fr".into()), replace_ocr: true, ..Default::default() }).unwrap();
     let outcome = job.run(&ocr, |_, _| true);
-    assert!(outcome.fallback.is_some() && outcome.pages[0].skipped.is_some() && outcome.pages[0].replaced.is_none(), "{outcome:?}");
+    let kept = outcome.pages[0].skipped.as_ref().map(|k| k.kind);
+    assert!(outcome.fallback.is_some() && kept == Some(ocr::SkipKind::KeptEarlierText) && outcome.pages[0].replaced.is_none(), "{outcome:?}");
     s.apply_ocr(id, &outcome.pages).unwrap();
     assert_eq!(page_texts(&s, id)[0], "Déjà", "the earlier text stays");
     let _ = std::fs::remove_dir_all(&dir);
@@ -4634,17 +4689,23 @@ fn recognize_text_again_replaces_its_own_earlier_text() {
         up: [0.0, 10.0],
     });
     s.apply(id, Edit::AddOcrText { page: 0, words: earlier.collect() }).unwrap();
+    // The reviewer's defect: a page with other text beside its OCR text was offered for
+    // replacing, then skipped for having text. It is read, and the other text stays.
+    let header = AddedText { rect: [72.0, 40.0, 300.0, 70.0], text: "Footnote".into(), size: 12.0, ..Default::default() };
+    s.apply(id, Edit::AddText { page: 0, text: header }).unwrap();
     assert!(s.recognize_text(id, &[], ocr::OcrSettings::default()).unwrap().pages[0].skipped.is_some(), "without replace_ocr it is skipped");
 
     let again = s.recognize_text(id, &[], ocr::OcrSettings { replace_ocr: true, ..Default::default() }).unwrap();
-    assert_eq!((again.pages[0].skipped.as_deref(), again.pages[0].replaced, again.replaced_pages()), (None, Some(2), 1), "{:?}", again.pages);
+    let replaced_words = again.pages[0].replaced.as_ref().map(|r| r.words);
+    assert_eq!((&again.pages[0].skipped, replaced_words, again.replaced_pages()), (&None, Some(2), 1), "{:?}", again.pages);
     let text = page_texts(&s, id)[0].to_lowercase();
     assert!(text.contains("quick") && text.contains("lazy") && !text.contains("qiuck") && !text.contains("teh"), "{text}");
     assert_eq!(text.matches("quick").count(), 1, "{text}");
+    assert_eq!(text.matches("footnote").count(), 1, "the other text stays, once: {text}");
     assert_eq!(s.get(id).unwrap().can_undo(), Some("Recognize text"));
     s.undo(id).unwrap();
     let text = page_texts(&s, id)[0].to_lowercase();
-    assert!(text.contains("qiuck") && !text.contains("lazy"), "one undo brings the earlier text back: {text}");
+    assert!(text.contains("qiuck") && !text.contains("lazy") && text.contains("footnote"), "one undo brings the earlier text back: {text}");
 }
 
 /// A scan of the OCR sentence at the source page's physical size, without a text layer.
@@ -5277,7 +5338,7 @@ fn actions_run_their_steps_on_files() {
     let src = s.create_from_text("t", "Quarterly numbers").unwrap();
     let built = actions::builtin();
     let numbers = built.iter().find(|a| a.name == "Add Page Numbers").unwrap();
-    let r = actions::run_on(numbers, "q.pdf", src.clone(), |_, _| {}).unwrap();
+    let r = actions::run_on(numbers, "q.pdf", src.clone(), Default::default(), |_, _| {}).unwrap();
     let mut s2 = Session::new();
     let id = s2.open("out.pdf", None, r.bytes, None).unwrap();
     assert!(page_texts(&s2, id)[0].contains("Page 1 of 1"), "{:?}", page_texts(&s2, id));
@@ -5295,14 +5356,14 @@ fn actions_run_their_steps_on_files() {
         builtin: false,
     };
     let mut steps = Vec::new();
-    let r = actions::run_on(&custom, "q.pdf", src, |i, n| steps.push((i, n))).unwrap();
+    let r = actions::run_on(&custom, "q.pdf", src, Default::default(), |i, n| steps.push((i, n))).unwrap();
     assert_eq!(steps, [(0, 4), (1, 4), (2, 4), (3, 4)]);
     assert_eq!(r.log.len(), 4, "{:?}", r.log);
     let id = s2.open("out2.pdf", None, r.bytes, None).unwrap();
     let d = s2.get(id).unwrap();
     assert_eq!(d.info.title.as_deref(), Some("Q3"));
     assert!(page_texts(&s2, id)[0].contains("DRAFT"));
-    assert!(actions::run_on(&custom, "bad.pdf", Arc::new(b"nope".to_vec()), |_, _| {}).is_err());
+    assert!(actions::run_on(&custom, "bad.pdf", Arc::new(b"nope".to_vec()), Default::default(), |_, _| {}).is_err());
 }
 
 /// A removal step that fails (here: a signed file can't be rewritten without its hidden data)
@@ -5319,7 +5380,7 @@ fn actions_fail_when_hidden_information_could_not_be_removed() {
     let signed = s.sign(id, &digital_id, SignOptions { page: 1, ..SignOptions::default() }).unwrap();
     let built = actions::builtin();
     let sanitize = built.iter().find(|a| a.name == "Sanitize Documents").unwrap();
-    let e = actions::run_on(sanitize, "signed.pdf", signed, |_, _| {}).map(|r| r.log).unwrap_err();
+    let e = actions::run_on(sanitize, "signed.pdf", signed, Default::default(), |_, _| {}).map(|r| r.log).unwrap_err();
     assert!(e.starts_with("Sanitize document:"), "{e}");
 }
 

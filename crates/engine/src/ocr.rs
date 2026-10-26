@@ -14,15 +14,18 @@
 //! **Reading a page again.** PdfCraft's own OCR text counts as the page's text, so a second run
 //! skips the page, or adds only the words the first one missed. With
 //! [`OcrSettings::replace_ocr`] it is set aside instead: the page is read as if it weren't there,
-//! and the new text replaces it in the same undoable step ([`Edit::ReplaceOcrText`]). Only text
-//! that is exactly an OCR layer PdfCraft wrote is replaced ([`pdfcraft_edit::own_ocr_layers`]);
-//! an edited layer and every other kind of text stay.
+//! and the new text replaces it in the same undoable step ([`Edit::ReplaceOcrText`]). Such a page
+//! is read even when it has other text too (a header, a text box): that text stays, and the words
+//! it already has are not added again. Only text that is exactly an OCR layer PdfCraft wrote is
+//! replaced ([`pdfcraft_edit::own_ocr_layers`]); an edited layer and every other kind of text
+//! stay, and a page whose OCR layers changed while it was read is not touched
+//! ([`Session::stale_replacements`]).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
-use pdfcraft_cos::{SaveOptions, write_incremental};
+use pdfcraft_cos::{ObjRef, SaveOptions, write_incremental};
 use pdfcraft_render::{PageInfo, PageRenderer, RenderConfig, RenderRequest, RequestKind};
 
 pub use pdfcraft_ocr::{
@@ -49,12 +52,12 @@ pub struct OcrSettings {
     /// that is read, so a scan with a few comments on it is still a scan. `false`: everything
     /// the page shows.
     pub native_text_only: bool,
-    /// Replace PdfCraft's own earlier OCR text ([`pdfcraft_edit::own_ocr_layers`]): it doesn't
-    /// count as the page's text, so a page whose only text it is is read again, and the new
-    /// words take its place in the same undoable step. A page where nothing is recognised keeps
-    /// it, and so does one read as English because its language's model is missing (that would
-    /// lose its accents). Text added any other way, an OCR layer edited since included, stays
-    /// and counts.
+    /// Replace PdfCraft's own earlier OCR text ([`pdfcraft_edit::own_ocr_layers`]): a page that
+    /// has some is read again, whatever `skip_text_pages` says, as if it weren't there, and the
+    /// new words take its place in the same undoable step. A page where nothing is recognised
+    /// keeps it, and so does one read as English because its language's model is missing (that
+    /// would lose its accents). Text added any other way, an OCR layer edited since included,
+    /// stays, and its words are not added again.
     pub replace_ocr: bool,
 }
 
@@ -97,6 +100,36 @@ pub fn resolve_language(tag: &str) -> Result<&'static Language, String> {
     })
 }
 
+/// Why a page was not read, or its result not used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipKind {
+    /// It has text of its own ([`OcrSettings::skip_text_pages`]).
+    HasText,
+    /// Its earlier OCR text was kept rather than replaced: the language asked for was read as
+    /// English.
+    KeptEarlierText,
+    /// It couldn't be read (it didn't render, or recognition failed).
+    Failed,
+}
+
+/// A page not read, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skip {
+    pub kind: SkipKind,
+    /// Why, in a sentence (in English: automation results show it).
+    pub reason: String,
+}
+
+/// PdfCraft's earlier OCR text on a page, which a new reading replaces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Replaced {
+    /// Its words.
+    pub words: usize,
+    /// The content streams that hold it, when the page was read: they must still be its OCR
+    /// text, and all of it, when the result is applied.
+    pub streams: Vec<ObjRef>,
+}
+
 /// What recognition found on one page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OcrPage {
@@ -105,11 +138,11 @@ pub struct OcrPage {
     /// Words recognised but left out because the page's own text already has them there.
     pub already_on_page: usize,
     /// Why the page was not read, if it was skipped.
-    pub skipped: Option<String>,
-    /// With [`OcrSettings::replace_ocr`]: the number of words of PdfCraft's earlier OCR text that
-    /// `words` replace. `None` when they replace nothing (the page had none, or nothing was
-    /// recognised on it, which keeps it).
-    pub replaced: Option<usize>,
+    pub skipped: Option<Skip>,
+    /// With [`OcrSettings::replace_ocr`]: PdfCraft's earlier OCR text that `words` replace.
+    /// `None` when they replace nothing (the page had none, or nothing was recognised on it,
+    /// which keeps it).
+    pub replaced: Option<Replaced>,
 }
 
 impl OcrPage {
@@ -230,8 +263,8 @@ pub fn availability(language: &Language) -> Availability {
     statuses(None).into_iter().find(|(l, _)| *l == language).map_or(Availability::Missing, |(_, a)| a)
 }
 
-/// A document's bytes without PdfCraft's own OCR text, and the words that text had per page.
-type SetAside = (Arc<Vec<u8>>, BTreeMap<usize, usize>);
+/// A document's bytes without PdfCraft's own OCR text, and that text per page.
+type SetAside = (Arc<Vec<u8>>, BTreeMap<usize, Replaced>);
 
 /// Everything recognition needs from a document, detached from the session.
 pub struct OcrJob {
@@ -245,9 +278,9 @@ pub struct OcrJob {
     pub settings: OcrSettings,
     /// The language the pages are read as: the settings', else the document's default.
     pub language: &'static Language,
-    /// With [`OcrSettings::replace_ocr`]: per page that has PdfCraft's own OCR text, its number
-    /// of words. `bytes` is the document without it, so the page is read as if it weren't there.
-    replacing: BTreeMap<usize, usize>,
+    /// With [`OcrSettings::replace_ocr`]: per page that has PdfCraft's own OCR text, that text.
+    /// `bytes` is the document without it, so the page is read as if it weren't there.
+    replacing: BTreeMap<usize, Replaced>,
 }
 
 impl OcrJob {
@@ -265,7 +298,13 @@ impl OcrJob {
                 break;
             }
             let Some(info) = self.infos.get(page) else { continue };
-            let skip = |why: &str| OcrPage { page, words: Vec::new(), already_on_page: 0, skipped: Some(why.into()), replaced: None };
+            let skip = |kind: SkipKind, why: &str| OcrPage {
+                page,
+                words: Vec::new(),
+                already_on_page: 0,
+                skipped: Some(Skip { kind, reason: why.into() }),
+                replaced: None,
+            };
             // The boxes of the page's own text (an earlier OCR layer's included, unless it is
             // being replaced), in view space.
             let existing: Vec<[f32; 4]> = r
@@ -273,13 +312,13 @@ impl OcrJob {
                 .text
                 .map(|t| t.glyphs.iter().filter(|g| !g.text.trim().is_empty()).map(|g| g.rect).collect())
                 .unwrap_or_default();
-            if self.settings.skip_text_pages && !existing.is_empty() {
-                out.push(skip("the page already contains text"));
+            if self.skips_for_text(page, !existing.is_empty()) {
+                out.push(skip(SkipKind::HasText, "the page already contains text"));
                 continue;
             }
             let shot = r.render(RenderRequest { page, scale: self.scale(page, info), ..Default::default() });
             if let Some(e) = shot.error {
-                out.push(skip(&e));
+                out.push(skip(SkipKind::Failed, &e));
                 continue;
             }
             // One page the recogniser can't take (a panic in it) skips that page, not the run.
@@ -288,17 +327,17 @@ impl OcrJob {
             let recognition = match read {
                 Ok(r) => r,
                 Err(e) => {
-                    out.push(skip(&e.to_string()));
+                    out.push(skip(SkipKind::Failed, &e.to_string()));
                     continue;
                 }
             };
             // Replacing never trades the earlier text for a poorer reading: read as English
             // instead of the language asked for, the page keeps what it has.
             if let (Some(f), true) = (&recognition.fallback, self.replacing.contains_key(&page)) {
-                out.push(skip(&format!(
-                    "its earlier recognized text was kept rather than replaced by a reading in English instead of {}",
-                    f.from.name
-                )));
+                out.push(skip(
+                    SkipKind::KeptEarlierText,
+                    &format!("its earlier recognized text was kept rather than replaced by a reading in English instead of {}", f.from.name),
+                ));
                 fallback = fallback.or(recognition.fallback);
                 continue;
             }
@@ -315,12 +354,19 @@ impl OcrJob {
                 recognition.lines.iter().flat_map(|l| &l.words).partition(|w| covered(w.rect.map(|v| v / scale), &existing) < ALREADY_ON_PAGE);
             let words: Vec<PlacedWord> = fresh.into_iter().map(|w| PlacedWord::place(w, to_user)).collect();
             // Nothing recognised keeps the earlier text: an empty result replaces nothing.
-            let replaced = self.replacing.get(&page).copied().filter(|_| !words.is_empty());
+            let replaced = self.replacing.get(&page).filter(|_| !words.is_empty()).cloned();
             out.push(OcrPage { page, words, already_on_page: already.len(), skipped: None, replaced });
         }
         progress(total, total);
         let language = if fallback.is_some() { ENGLISH } else { self.language };
         OcrOutcome { pages: out, language, fallback }
+    }
+
+    /// Whether `page` is left unread for having text of its own: with
+    /// [`OcrSettings::skip_text_pages`], unless its earlier OCR text is being replaced, which is
+    /// the point of reading it (its other text stays, and isn't added again).
+    fn skips_for_text(&self, page: usize, has_text: bool) -> bool {
+        self.settings.skip_text_pages && has_text && !self.replacing.contains_key(&page)
     }
 
     /// The render scale (pixels per point) `page` is read at. A scan is read at its own
@@ -360,12 +406,35 @@ impl Session {
     }
 
     /// Of `pages` (0-based; empty = all), those that have PdfCraft's own OCR text, which
-    /// [`OcrSettings::replace_ocr`] replaces. It reads their OCR streams: ask once per change.
+    /// [`OcrSettings::replace_ocr`] replaces. One walk of the page tree, reading only the
+    /// streams tagged as OCR text: ask once per change.
     pub fn own_ocr_pages(&self, id: DocId, pages: &[usize]) -> Vec<usize> {
-        let Some(editor) = self.get(id).and_then(|d| d.editor.as_ref()) else { return Vec::new() };
-        let all = self.get(id).map_or(0, |d| d.info.pages.len());
-        let pages: Vec<usize> = if pages.is_empty() { (0..all).collect() } else { pages.iter().copied().filter(|p| *p < all).collect() };
-        pages.into_iter().filter(|&p| pdfcraft_edit::own_ocr_layers(&editor.cos, p).is_ok_and(|l| l.streams > 0)).collect()
+        self.own_ocr_text(id, pages).into_keys().collect()
+    }
+
+    /// PdfCraft's own OCR text on each of `pages` (0-based; empty = all) that has some, as a
+    /// replacing run finds it ([`OcrPage::replaced`]).
+    pub fn own_ocr_text(&self, id: DocId, pages: &[usize]) -> BTreeMap<usize, Replaced> {
+        let Some(editor) = self.get(id).and_then(|d| d.editor.as_ref()) else { return BTreeMap::new() };
+        let wanted: std::collections::BTreeSet<usize> = pages.iter().copied().collect();
+        pdfcraft_edit::own_ocr_pages(&editor.cos)
+            .into_iter()
+            .filter(|(p, _)| wanted.is_empty() || wanted.contains(p))
+            .map(|(p, l)| (p, Replaced { words: l.words, streams: l.streams }))
+            .collect()
+    }
+
+    /// The pages of `found` whose replacement no longer fits document `id`: their OCR text has
+    /// changed since they were read (a word corrected, pages inserted or moved, the text replaced
+    /// already), so applying the result would remove text it didn't read, or stack a second layer.
+    /// [`Session::apply_ocr`] refuses them; leave them out (keeping the page as it is) and say so.
+    pub fn stale_replacements(&self, id: DocId, found: &[OcrPage]) -> Vec<usize> {
+        let replacing: Vec<&OcrPage> = found.iter().filter(|p| p.replaced.is_some() && !p.words.is_empty()).collect();
+        if replacing.is_empty() {
+            return Vec::new();
+        }
+        let now = self.own_ocr_text(id, &[]);
+        replacing.into_iter().filter(|p| p.replaced.as_ref().map(|r| &r.streams) != now.get(&p.page).map(|n| &n.streams)).map(|p| p.page).collect()
     }
 
     /// Capture what recognising `pages` (0-based; empty = all) of document `id` needs. Refuses a
@@ -378,22 +447,20 @@ impl Session {
         };
         let all = doc.info.pages.len();
         let pages: Vec<usize> = if pages.is_empty() { (0..all).collect() } else { pages.iter().copied().filter(|p| *p < all).collect() };
-        let native = (0..all)
-            .map(|p| {
-                if !pages.contains(&p) {
-                    return None;
-                }
-                doc.page_images(p)
-                    .iter()
-                    .filter(|i| i.width > 1 && i.height > 1)
-                    .map(|i| {
-                        let m = i.matrix;
-                        let (w, h) = (m[0].hypot(m[1]), m[2].hypot(m[3]));
-                        (i.width as f64 / w.max(1e-6)).max(i.height as f64 / h.max(1e-6)) as f32
-                    })
-                    .reduce(f32::max)
-            })
-            .collect();
+        // Each page's scan resolution (pixels per point), from one walk of the page tree.
+        let mut native = vec![None; all];
+        for (p, images) in doc.editor.as_ref().map(|e| pdfcraft_edit::pages_images(&e.cos, &pages)).unwrap_or_default() {
+            let Some(slot) = native.get_mut(p) else { continue };
+            *slot = images
+                .iter()
+                .filter(|i| i.width > 1 && i.height > 1)
+                .map(|i| {
+                    let m = i.matrix;
+                    let (w, h) = (m[0].hypot(m[1]), m[2].hypot(m[3]));
+                    (i.width as f64 / w.max(1e-6)).max(i.height as f64 / h.max(1e-6)) as f32
+                })
+                .reduce(f32::max);
+        }
         let (bytes, replacing) = if settings.replace_ocr { self.without_own_ocr(id, &pages)? } else { (doc.bytes.clone(), BTreeMap::new()) };
         Ok(OcrJob { bytes, password: doc.password.clone(), infos: doc.info.pages.clone(), native, pages, settings, language, replacing })
     }
@@ -404,18 +471,14 @@ impl Session {
     fn without_own_ocr(&self, id: DocId, pages: &[usize]) -> Result<SetAside, String> {
         let doc = self.get(id).ok_or("no such document")?;
         let Some(editor) = doc.editor.as_ref() else { return Ok((doc.bytes.clone(), BTreeMap::new())) };
-        let found: BTreeMap<usize, usize> = pages
-            .iter()
-            .filter_map(|&p| pdfcraft_edit::own_ocr_layers(&editor.cos, p).ok().filter(|l| l.streams > 0).map(|l| (p, l.words)))
-            .collect();
+        let found = self.own_ocr_text(id, pages);
         if found.is_empty() {
             return Ok((doc.bytes.clone(), found));
         }
         let set_aside = crate::guard(|| {
             let mut cos = editor.cos.clone();
-            for &page in found.keys() {
-                pdfcraft_edit::remove_own_ocr_layers(&mut cos, page).map_err(|e| e.to_string())?;
-            }
+            let pages: Vec<usize> = found.keys().copied().collect();
+            pdfcraft_edit::remove_own_ocr_layers(&mut cos, &pages).map_err(|e| e.to_string())?;
             write_incremental(&cos, &SaveOptions::default()).map_err(|e| e.to_string())
         });
         let bytes = set_aside.and_then(|r| r).map_err(|e| format!("the earlier recognized text could not be set aside: {e}"))?;
@@ -424,12 +487,14 @@ impl Session {
 
     /// Add the words found by [`OcrJob::run`] as one undoable step, replacing PdfCraft's earlier
     /// OCR text on the pages that say so ([`OcrPage::replaced`]). Returns the number of words.
+    /// Fails, changing nothing, when a page's OCR text is no longer what it replaces
+    /// ([`Session::stale_replacements`]).
     pub fn apply_ocr(&mut self, id: DocId, found: &[OcrPage]) -> Result<usize, EditError> {
         let edits: Vec<Edit> = found
             .iter()
             .filter(|p| !p.words.is_empty())
-            .map(|p| match p.replaced {
-                Some(_) => Edit::ReplaceOcrText { page: p.page, words: p.words.clone() },
+            .map(|p| match &p.replaced {
+                Some(r) => Edit::ReplaceOcrText { page: p.page, words: p.words.clone(), replaces: r.streams.clone() },
                 None => Edit::AddOcrText { page: p.page, words: p.words.clone() },
             })
             .collect();
@@ -623,35 +688,101 @@ mod tests {
         assert_eq!(s.own_ocr_pages(id, &[1, 9]), [1]);
 
         let job = s.ocr_job(id, &[], OcrSettings { replace_ocr: true, ..Default::default() }).unwrap();
-        assert_eq!(job.replacing, BTreeMap::from([(0, 2), (1, 1)]));
+        assert_eq!(job.replacing.iter().map(|(p, r)| (*p, r.words, r.streams.len())).collect::<Vec<_>>(), [(0, 2, 1), (1, 1, 1)]);
         assert_eq!(texts(&job.bytes), ["", "Invoice"], "read as if the OCR text weren't there; the added text stays");
         assert!(Arc::ptr_eq(&s.get(id).unwrap().bytes, &before), "the document itself is untouched");
         let plain = s.ocr_job(id, &[], OcrSettings::default()).unwrap();
         assert!(plain.replacing.is_empty() && Arc::ptr_eq(&plain.bytes, &before), "without replace_ocr nothing is set aside");
+        // The reviewer's defect: page 1 has text of its own beside its OCR text, so it was skipped
+        // and nothing replaced, though the dialog offered it. A page being replaced is read; one
+        // that isn't, with text, is still skipped.
+        assert!(!job.skips_for_text(1, true) && !job.skips_for_text(0, true), "pages being replaced are read");
+        assert!(plain.skips_for_text(1, true) && !plain.skips_for_text(1, false));
 
-        // Page 0 is read again; page 1 still has text of its own, so it is skipped and kept.
+        // Both pages are read again; page 1's "Invoice" is not added again.
+        let replaced = |p: usize| job.replacing.get(&p).cloned();
         let found = [
             OcrPage {
                 page: 0,
                 words: vec![word("Old", 10.0, 100.0), word("words", 40.0, 100.0)],
                 already_on_page: 0,
                 skipped: None,
-                replaced: Some(2),
+                replaced: replaced(0),
             },
-            OcrPage { page: 1, words: Vec::new(), already_on_page: 0, skipped: Some("the page already contains text".into()), replaced: None },
+            OcrPage { page: 1, words: vec![word("scan", 10.0, 20.0)], already_on_page: 1, skipped: None, replaced: replaced(1) },
         ];
+        assert!(s.stale_replacements(id, &found).is_empty());
         let labels_before = s.get(id).unwrap().can_undo().map(String::from);
-        assert_eq!(s.apply_ocr(id, &found).unwrap(), 2);
-        assert_eq!(texts(&s.get(id).unwrap().bytes), ["Old words", "Invoice scan"]);
+        assert_eq!(s.apply_ocr(id, &found).unwrap(), 3);
+        assert_eq!(texts(&s.get(id).unwrap().bytes), ["Old words", "Invoice scan"], "page 1's OCR text replaced, not doubled");
         assert_eq!(s.own_ocr_pages(id, &[]), [0, 1], "the new text is an OCR layer of PdfCraft's too");
         assert_eq!(s.get(id).unwrap().can_undo(), Some("Recognize text"));
         assert_eq!(s.get(id).unwrap().page_images(0).len(), 1, "the scan stays");
+        // Applied once, the same result no longer fits: its streams are gone.
+        assert_eq!(s.stale_replacements(id, &found), [0, 1]);
+        assert!(s.apply_ocr(id, &found).is_err());
+        assert_eq!(texts(&s.get(id).unwrap().bytes), ["Old words", "Invoice scan"], "a refused result changes nothing");
 
         s.undo(id).unwrap();
         assert_eq!(texts(&s.get(id).unwrap().bytes), ["Odl wrds", "Invoice scan"], "one undo brings the earlier text back");
         assert_eq!(s.get(id).unwrap().can_undo().map(String::from), labels_before);
         s.redo(id).unwrap();
         assert_eq!(texts(&s.get(id).unwrap().bytes), ["Old words", "Invoice scan"]);
+    }
+
+    /// The reviewer's defect: a run's result was applied to whatever was at its page index when it
+    /// finished. A page inserted in front while the run was out moved the OCR text it had set aside
+    /// to the next index, and a corrected word made the layer the user's; either way the result
+    /// would strip text it never read, or stack a second layer. Such pages are refused.
+    #[test]
+    fn a_replacement_that_no_longer_fits_its_page_is_refused() {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = scan(&mut s, 2);
+        s.apply(id, Edit::AddOcrText { page: 0, words: vec![word("first", 10.0, 100.0)] }).unwrap();
+        s.apply(id, Edit::AddOcrText { page: 1, words: vec![word("second", 10.0, 100.0)] }).unwrap();
+        let job = s.ocr_job(id, &[], OcrSettings { replace_ocr: true, ..Default::default() }).unwrap();
+        let found: Vec<OcrPage> = (0..2)
+            .map(|p| OcrPage {
+                page: p,
+                words: vec![word("new", 10.0, 50.0)],
+                already_on_page: 0,
+                skipped: None,
+                replaced: job.replacing.get(&p).cloned(),
+            })
+            .collect();
+        // A blank page goes in front while the run is out.
+        s.apply(id, Edit::InsertBlankPage { at: 0, width: 200.0, height: 200.0 }).unwrap();
+        assert_eq!(texts(&s.get(id).unwrap().bytes), ["", "first", "second"]);
+        assert_eq!(s.stale_replacements(id, &found), [0, 1]);
+        let err = s.apply_ocr(id, &found).unwrap_err().to_string();
+        assert!(err.contains("changed while it was being read again"), "{err}");
+        assert_eq!(texts(&s.get(id).unwrap().bytes), ["", "first", "second"], "nothing changed");
+        // Left out, the rest applies.
+        s.undo(id).unwrap();
+        let fits: Vec<OcrPage> = found.iter().filter(|p| p.page == 1).cloned().collect();
+        let note = crate::AddedText { rect: [10.0, 10.0, 100.0, 40.0], text: "note".into(), size: 9.0, ..Default::default() };
+        s.apply(id, Edit::AddText { page: 0, text: note }).unwrap();
+        assert!(s.stale_replacements(id, &fits).is_empty(), "another change elsewhere doesn't matter");
+        s.apply_ocr(id, &fits).unwrap();
+        let after = texts(&s.get(id).unwrap().bytes);
+        assert!(after[0].contains("first") && after[0].contains("note") && after[1] == "new", "{after:?}");
+    }
+
+    /// Finding the pages with OCR text, setting it aside and sizing each page's scan walk the
+    /// page tree once: opening Recognize Text on a long scan, and starting a run on it, took a
+    /// minute when they walked it once a page.
+    #[test]
+    fn a_long_document_s_ocr_text_is_found_in_one_walk() {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let bytes = s.create_blank(595.0, 842.0, 4000).unwrap();
+        let id = s.open("long.pdf", None, bytes, None).unwrap();
+        s.apply(id, Edit::AddOcrText { page: 3999, words: vec![word("last", 10.0, 100.0)] }).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(s.own_ocr_pages(id, &[]), [3999]);
+        assert_eq!(s.own_ocr_pages(id, &[0, 1, 2]), Vec::<usize>::new());
+        let job = s.ocr_job(id, &[], OcrSettings { replace_ocr: true, ..Default::default() }).unwrap();
+        assert_eq!(job.replacing.keys().copied().collect::<Vec<_>>(), [3999]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
     }
 
     /// Model files are untrusted: missing or damaged ones are an error, never a panic, a
