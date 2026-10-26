@@ -319,8 +319,8 @@ fn grey(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, OcrError> {
     };
     match (pixels.len() / area, pixels.len() % area) {
         (1, 0) => Ok(pixels.to_vec()),
-        (3, 0) => Ok(pixels.chunks_exact(3).map(luma).collect()),
-        (4, 0) => Ok(pixels.chunks_exact(4).map(luma).collect()),
+        (3, 0) => Ok(pixels.as_chunks::<3>().0.iter().map(|p| luma(p)).collect()),
+        (4, 0) => Ok(pixels.as_chunks::<4>().0.iter().map(|p| luma(p)).collect()),
         _ => Err(OcrError::BadImage),
     }
 }
