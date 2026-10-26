@@ -285,8 +285,12 @@ pub struct OcrJob {
 
 impl OcrJob {
     /// Read the pages. `progress(done, total)` is called before each page; returning `false`
-    /// stops (the pages read so far are returned).
-    pub fn run(self, ocr: &Ocr, mut progress: impl FnMut(usize, usize) -> bool) -> OcrOutcome {
+    /// stops (the pages read so far are returned). Fails before reading any page when the job's
+    /// language can't be read with `ocr` at all, as itself or as English (its model is missing
+    /// or damaged, and so is English's): every page would fail the same way, and a run, a file
+    /// or a batch must say why rather than report no words.
+    pub fn run(self, ocr: &Ocr, mut progress: impl FnMut(usize, usize) -> bool) -> Result<OcrOutcome, String> {
+        crate::guard(|| ocr.check(self.language)).unwrap_or_else(|panic| Err(OcrError::Recognize(panic))).map_err(|e| e.to_string())?;
         let config =
             RenderConfig { password: self.password.as_deref().map(Arc::from), hide_comments: self.settings.native_text_only, ..Default::default() };
         let mut r = PageRenderer::new(self.bytes.clone(), config);
@@ -359,7 +363,7 @@ impl OcrJob {
         }
         progress(total, total);
         let language = if fallback.is_some() { ENGLISH } else { self.language };
-        OcrOutcome { pages: out, language, fallback }
+        Ok(OcrOutcome { pages: out, language, fallback })
     }
 
     /// Whether `page` is left unread for having text of its own: with
@@ -512,7 +516,7 @@ impl Session {
         }
         let job = self.ocr_job(id, pages, settings)?;
         let ocr = engine()?;
-        let found = job.run(&ocr, |_, _| true);
+        let found = job.run(&ocr, |_, _| true)?;
         self.apply_ocr(id, &found.pages).map_err(|e| e.to_string())?;
         Ok(found)
     }
@@ -557,7 +561,7 @@ pub fn recognize_file(
         settings.language = Some(s.ocr_language_for(id, interface).code.to_string());
     }
     let job = s.ocr_job(id, &[], settings)?;
-    let OcrOutcome { pages, language, fallback } = job.run(ocr, progress);
+    let OcrOutcome { pages, language, fallback } = job.run(ocr, progress)?;
     if s.apply_ocr(id, &pages).map_err(|e| e.to_string())? == 0 {
         return Ok(FileResult { bytes, pages, language, fallback });
     }

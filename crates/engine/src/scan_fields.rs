@@ -128,7 +128,8 @@ impl Session {
             return Vec::new();
         };
         job.run(&engine, |_, _| true)
-            .pages
+            .map(|o| o.pages)
+            .unwrap_or_default()
             .into_iter()
             .flat_map(|p| p.words)
             .filter_map(|w| {

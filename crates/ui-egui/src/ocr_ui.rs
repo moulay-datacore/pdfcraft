@@ -199,6 +199,10 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(tl!("This language's model isn't installed.")).small().color(t.text));
             }
+            Availability::Unusable => {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(tl!("This language's model couldn't be loaded: reinstall PdfCraft.")).small().color(t.text));
+            }
             _ => {}
         }
         ui.add_space(4.0);
@@ -219,7 +223,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         );
         ui.add_space(6.0);
     }
-    let ready = state(&d.language) != Availability::Missing;
+    let ready = readable(state(&d.language));
     ui.add_space(6.0);
     let (mut go, mut cancel) = (false, false);
     ui.horizontal(|ui| {
@@ -248,8 +252,14 @@ fn language_label(language: &Language, availability: Availability) -> String {
     match availability {
         Availability::Ready => name.to_string(),
         Availability::FallsBackToEnglish => crate::i18n::fmt(tl!("{language} — read as English"), &[("language", name)]),
+        Availability::Unusable => crate::i18n::fmt(tl!("{language} — couldn't be loaded"), &[("language", name)]),
         Availability::Missing => crate::i18n::fmt(tl!("{language} — not installed"), &[("language", name)]),
     }
+}
+
+/// Whether a language in this state can be read at all, as itself or as English.
+fn readable(availability: Availability) -> bool {
+    matches!(availability, Availability::Ready | Availability::FallsBackToEnglish)
 }
 
 /// What the result adds when a language was read as English instead ("; read as English: the
@@ -361,7 +371,7 @@ impl PdfCraftApp {
     /// background picture is left alone.
     fn auto_ocr_settings(&self, doc: DocId) -> Option<OcrSettings> {
         let language = self.ocr_language_for(doc);
-        if self.ocr_statuses().iter().any(|(l, a)| *l == language && *a == Availability::Missing) {
+        if self.ocr_statuses().iter().any(|(l, a)| *l == language && !readable(*a)) {
             return None;
         }
         let mut settings = self.ocr_draft.settings();
@@ -438,15 +448,19 @@ impl PdfCraftApp {
         let models = self.ocr_models.clone();
         let work = move || {
             crate::i18n::set_current(lang);
+            // A language that can't be read at all fails the run, saying why (a model missing or
+            // damaged), rather than reading every page in vain.
             let result = recognize_guarded(|| {
-                engine(models.as_ref()).map(|ocr| {
-                    job.run(&ocr, |done, total| {
-                        let Ok(mut s) = p.lock() else { return false };
-                        s.done = done;
-                        s.total = total;
-                        !s.cancel
+                engine(models.as_ref())
+                    .and_then(|ocr| {
+                        job.run(&ocr, |done, total| {
+                            let Ok(mut s) = p.lock() else { return false };
+                            s.done = done;
+                            s.total = total;
+                            !s.cancel
+                        })
                     })
-                })
+                    .map_err(|e| failed(&e))
             });
             if let Ok(mut s) = p.lock() {
                 s.result = Some(result);
@@ -682,6 +696,12 @@ impl PdfCraftApp {
         let read = found.iter().filter(|p| p.skipped.is_none()).count();
         let skipped = |kind: SkipKind| found.iter().filter(|p| p.skipped.as_ref().is_some_and(|s| s.kind == kind)).count();
         let (has_text, kept, unread) = (skipped(SkipKind::HasText), skipped(SkipKind::KeptEarlierText), skipped(SkipKind::Failed));
+        // Why the first page that couldn't be read wasn't (a page that didn't render, say).
+        let unread_why = found
+            .iter()
+            .filter_map(|p| p.skipped.as_ref())
+            .find(|s| s.kind == SkipKind::Failed && !s.reason.trim().is_empty())
+            .map(|s| s.reason.clone());
         let replaced = found.iter().filter(|p| p.replaced.is_some() && !p.words.is_empty()).count();
         match self.session.apply_ocr(doc, &found) {
             Ok(words) => {
@@ -717,6 +737,10 @@ impl PdfCraftApp {
                 }
                 if unread > 0 {
                     msg.push_str(&count(unread, tl!("; 1 page couldn't be read"), tl!("; {n} pages couldn't be read")));
+                    // Why can run long (a path, a decoder's message).
+                    if let Some(why) = &unread_why {
+                        msg.push_str(&format!(" ({})", why.chars().take(200).collect::<String>()));
+                    }
                 }
                 // Why is in the fallback note that follows.
                 if kept > 0 {
@@ -1034,7 +1058,10 @@ mod tests {
             page,
             words: Vec::new(),
             already_on_page: 0,
-            skipped: Some(pdfcraft_engine::ocr::Skip { kind, reason: String::new() }),
+            skipped: Some(pdfcraft_engine::ocr::Skip {
+                kind,
+                reason: if kind == SkipKind::Failed { "it didn't render".into() } else { String::new() },
+            }),
             replaced: None,
         };
         let read = |page: usize, text: &str| pdfcraft_engine::ocr::OcrPage {
@@ -1060,7 +1087,7 @@ mod tests {
         app.poll_ocr();
         assert_eq!(
             app.toast.take().map(|t| t.0).unwrap_or_default(),
-            "Recognized 1 word on 1 page; 2 pages already had text; 1 page couldn't be read; kept the earlier recognized text on 1 page; \
+            "Recognized 1 word on 1 page; 2 pages already had text; 1 page couldn't be read (it didn't render); kept the earlier recognized text on 1 page; \
              1 page was left as it was: its recognized text changed during the run; read as English: the French model isn't installed"
         );
         let bytes = app.session.get(id).unwrap().bytes.clone();

@@ -456,6 +456,51 @@ fn a_language_that_cannot_be_read_says_so_and_is_not_run() {
     assert!(!recognize_disabled(&h));
 }
 
+/// The reviewer's defect: with English's model damaged beside the accented-Latin one, a run in
+/// English read nothing and said "Recognized 0 words on 0 pages; 1 page couldn't be read", and
+/// many files said "Recognized 0 words in 1 file" and wrote copies without text, after which the
+/// picker called the damaged model not installed. Each says why it failed, nothing is written,
+/// and the picker says the model couldn't be loaded (needs the models; skipped without them).
+#[test]
+fn a_damaged_english_model_fails_the_run_and_says_why() {
+    let Some(installed) = pdfcraft_engine::ocr::Models::find().filter(|m| m.latin.is_some()) else {
+        eprintln!("skipped: the accented-Latin model is not installed");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-ui-damaged-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let junk = dir.join(ENGLISH_MODEL);
+    std::fs::write(&junk, b"not a model").unwrap();
+    let damaged = pdfcraft_engine::ocr::Models { recognition: Some(junk), ..installed };
+    let mut h = recognize_dialog(scan(), Some(damaged.clone()));
+    h.get_by_label("Recognize text").click();
+    h.run_steps(3);
+    let toast = h.state().toast.clone().unwrap().0;
+    assert!(toast.starts_with("Recognize text failed") && toast.contains(ENGLISH_MODEL), "{toast}");
+    let id = h.state().active_ids().unwrap().1;
+    assert_eq!(h.state().session.get(id).unwrap().can_undo(), None, "nothing was added");
+    assert!(h.state_mut().execute("ocr.recognize"));
+    h.run_steps(2);
+    assert!(h.query_by(|n| n.role() == Role::ComboBox && n.value().as_deref() == Some("English — couldn't be loaded")).is_some());
+    assert!(h.query_by_label("This language's model couldn't be loaded: reinstall PdfCraft.").is_some());
+    assert!(recognize_disabled(&h));
+
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.run_inline = true;
+    app.ocr_models = Some(damaged);
+    app.export_dir_override = Some(dir.join("out").to_string_lossy().into_owned());
+    app.use_files(pdfcraft_ui_egui::FilePurpose::Ocr, vec![("one.pdf".into(), scan())]);
+    let toast = app.toast.clone().unwrap().0;
+    assert!(toast.contains("; failed: one.pdf: ") && toast.contains(ENGLISH_MODEL), "{toast}");
+    assert!(!dir.join("out/one.pdf").exists(), "no copy without text is written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The English recognition model's file name.
+const ENGLISH_MODEL: &str = "text-recognition.rten";
+
 /// "Replace existing OCR text" is offered only when a chosen page has text PdfCraft recognized
 /// before, and it is what the run is asked to do.
 #[test]

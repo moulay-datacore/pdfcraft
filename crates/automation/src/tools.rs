@@ -1257,7 +1257,7 @@ pub fn tools() -> Vec<ToolDef> {
                 }),
                 &["paths", "folder"],
             )),
-        t("ocr_status", "OCR status", "Whether text recognition is available (its models are installed: release packages include them; a source build fetches them with `cargo xtask models`; PDFCRAFT_MODELS overrides), where it looks for them, and the languages it reads, each with its reader and its state: ready, falls_back_to_english (its model is missing, so it would be read as English, without accents) or missing. The state comes from the files installed: a model file that is there but damaged shows as ready until a run in the same process has tried to load it; that run's result then says it fell back (fell_back_from, fallback_reason).")
+        t("ocr_status", "OCR status", "Whether text recognition is available (its models are installed: release packages include them; a source build fetches them with `cargo xtask models`; PDFCRAFT_MODELS overrides), where it looks for them, and the languages it reads, each with its reader and its state: ready, falls_back_to_english (its model is missing, so it would be read as English, without accents), unusable (its model is installed but failed to load, and nothing else can read it: a run in it fails with why) or missing. The state comes from the files installed: a model file that is there but damaged shows as ready until a run in the same process has tried to load it; that run's result then says it fell back (fell_back_from, fallback_reason), or fails with why when nothing else can read the language.")
             .ro()
             .cmd("ocr.recognize")
             .with(schema(json!({}), &[])),

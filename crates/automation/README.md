@@ -217,10 +217,13 @@ beside other text; an edited layer and other text stay). Every result names the 
 (`language`) and, when a language's model is missing or can't be loaded and the pages were read
 as English instead, the one asked for (`fell_back_from`) and why (`fallback_reason`); a page
 not read says why (`skipped`) and what kind of reason it is (`skip_kind`: `has_text`,
-`kept_earlier_text` or `failed`). `ocr_status` lists each language with its reader and state
-(`ready`, `falls_back_to_english`, `missing`), judged from the files installed: a damaged file
-shows as `ready` until a run in the same process has tried it. Paths go through `--root`
-confinement as for every other tool.
+`kept_earlier_text` or `failed`). A language that can't be read at all, not even as English
+(no models, or English asked for with its model missing or damaged), fails the call, or the
+file in `ocr_recognize_files` and `doc_batch`, with why. `ocr_status` lists each language with
+its reader and state (`ready`, `falls_back_to_english`, `unusable` for an installed model that
+failed to load with nothing else to read it, `missing`), judged from the files installed: a
+damaged file shows as `ready` until a run in the same process has tried it. Paths go through
+`--root` confinement as for every other tool.
 
 ## Folder batches
 

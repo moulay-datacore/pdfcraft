@@ -1292,8 +1292,10 @@
 	Dutch	Néerlandais
 	{language} — read as English	{language} — lu comme de l'anglais
 	{language} — not installed	{language} — non installé
+	{language} — couldn't be loaded	{language} — n'a pas pu être chargé
 	This language's model isn't available: its text will be read as English, without accents.	Le modèle de cette langue n'est pas disponible : son texte sera lu comme de l'anglais, sans les accents.
 	This language's model isn't installed.	Le modèle de cette langue n'est pas installé.
+	This language's model couldn't be loaded: reinstall PdfCraft.	Le modèle de cette langue n'a pas pu être chargé : réinstallez PdfCraft.
 	Replace existing OCR text	Remplacer le texte OCR existant
 	Pages with text PdfCraft recognized before are read again, and the new text takes its place; other text on them stays	Les pages dont PdfCraft a déjà reconnu le texte sont relues, et le nouveau texte prend sa place ; le reste du texte de ces pages est conservé
 	; read as English: the {language} model isn't installed	; lu comme de l'anglais : {language} — modèle non installé

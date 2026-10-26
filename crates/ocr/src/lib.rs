@@ -114,6 +114,9 @@ pub enum Availability {
     /// Its recognizer is missing, or failed to load ([`Ocr::availability`]), but English is
     /// installed: it would be read as English, without its accents.
     FallsBackToEnglish,
+    /// Its recognizer is installed but failed to load ([`Ocr::availability`]), and nothing else
+    /// can read it: reading it fails, with why ([`Ocr::check`]).
+    Unusable,
     /// Nothing that could read it is installed.
     Missing,
 }
@@ -381,13 +384,40 @@ impl Ocr {
     }
 
     /// Whether `language` can be read as itself, as far as is known: a model that failed to load
-    /// counts as missing.
+    /// can't read it, and makes it [`Availability::Unusable`] when nothing else can.
     pub fn availability(&self, language: &Language) -> Availability {
-        let ready = match language.reader {
-            Reader::Ocrs => self.english,
-            Reader::PpOcr => self.latin_files.is_some() && self.latin.get().is_none_or(Result::is_ok),
+        let latin_failed = self.latin.get().is_some_and(Result::is_err);
+        let (ready, failed) = match language.reader {
+            Reader::Ocrs => (self.english, self.english_error.is_some()),
+            Reader::PpOcr => (self.latin_files.is_some() && !latin_failed, latin_failed),
         };
-        availability_of(language, ready, self.english)
+        match availability_of(language, ready, self.english) {
+            Availability::Missing if failed => Availability::Unusable,
+            a => a,
+        }
+    }
+
+    /// Whether `language` can be read at all, as itself or as English ([`Ocr::recognize_in`]):
+    /// when it can't, the error reading it would give on every page, so a run can fail with it
+    /// before reading any. Loads the PP-OCR recognizer when that is the only one that could read
+    /// it.
+    pub fn check(&self, language: &'static Language) -> Result<(), OcrError> {
+        if self.english {
+            return Ok(());
+        }
+        match language.reader {
+            Reader::Ocrs => Err(self.english_unavailable()),
+            Reader::PpOcr => self.latin().map(|_| ()).map_err(|reason| self.unreadable(language, reason)),
+        }
+    }
+
+    /// The error for reading `language`, whose PP-OCR recognizer can't be used for `reason`, when
+    /// English can't be read instead either.
+    fn unreadable(&self, language: &Language, reason: FallbackReason) -> OcrError {
+        match reason {
+            FallbackReason::NotInstalled => self.english_unavailable(),
+            FallbackReason::Unusable(why) => OcrError::Load(format!("the {} recognition model", language.name), why),
+        }
     }
 
     /// The PP-OCR recognizer, loaded and checked the first time it is needed.
@@ -414,8 +444,7 @@ impl Ocr {
                 language: ENGLISH,
                 fallback: Some(Fallback { from: language, reason }),
             }),
-            Err(FallbackReason::NotInstalled) => Err(self.english_unavailable()),
-            Err(FallbackReason::Unusable(why)) => Err(OcrError::Load(format!("the {} recognition model", language.name), why)),
+            Err(reason) => Err(self.unreadable(language, reason)),
         }
     }
 
@@ -983,12 +1012,20 @@ mod tests {
         let reason = got.fallback.map(|f| f.reason);
         assert!(matches!(&reason, Some(FallbackReason::Unusable(why)) if why.contains(LATIN_MODEL)), "{reason:?}");
         assert_eq!(ocr.availability(fr), Availability::FallsBackToEnglish);
-        // Neither recognizer: an error.
+        assert!(ocr.check(fr).is_ok() && ocr.check(ENGLISH).is_ok(), "read as English");
+        // Damaged, and no English to read it instead: unusable, with why, before any page is read.
         models.recognition = None;
+        let ocr = Ocr::load(&models).unwrap();
+        let why = ocr.check(fr).unwrap_err().to_string();
+        assert!(why.contains(LATIN_MODEL), "{why}");
+        assert_eq!((ocr.availability(ENGLISH), ocr.availability(fr)), (Availability::Missing, Availability::Unusable));
+        assert!(matches!(ocr.recognize_in(&px, w, h, fr), Err(OcrError::Load(..))));
+        // Neither recognizer: an error.
         models.latin = None;
         let ocr = Ocr::load(&models).unwrap();
         assert!(matches!(ocr.recognize_in(&px, w, h, fr), Err(OcrError::NoModels)));
         assert!(matches!(ocr.recognize(&px, w, h), Err(OcrError::NoModels)));
+        assert!(matches!((ocr.check(ENGLISH), ocr.check(fr)), (Err(OcrError::NoModels), Err(OcrError::NoModels))));
         assert_eq!((ocr.availability(ENGLISH), ocr.availability(fr)), (Availability::Missing, Availability::Missing));
         // A huge image, or pixels that don't match the size, are refused before ocrs sees them.
         let ocr = Ocr::load(&Models::find().unwrap()).unwrap();
@@ -1013,7 +1050,11 @@ mod tests {
         models.recognition = Some(damaged);
         let ocr = Ocr::load(&models).unwrap_or_else(|e| panic!("{e}"));
         let fr = language("fr").unwrap();
-        assert_eq!((ocr.availability(ENGLISH), ocr.availability(fr)), (Availability::Missing, Availability::Ready));
+        // Installed but damaged: unusable, not missing, and a run can say why before reading.
+        assert_eq!((ocr.availability(ENGLISH), ocr.availability(fr)), (Availability::Unusable, Availability::Ready));
+        let why = ocr.check(ENGLISH).unwrap_err().to_string();
+        assert!(why.contains(RECOGNITION_MODEL), "{why}");
+        assert!(ocr.check(fr).is_ok());
         let (w, h, px) = test_image::rendered(&["Élève"], 0.0);
         let got = ocr.recognize_in(&px, w, h, fr).unwrap();
         assert_eq!((got.language, &got.fallback), (fr, &None));
@@ -1021,6 +1062,12 @@ mod tests {
         let why = ocr.recognize(&px, w, h).unwrap_err().to_string();
         assert!(why.contains(RECOGNITION_MODEL), "{why}");
         assert!(matches!(ocr.recognize_in(&px, w, h, ENGLISH), Err(OcrError::Load(..))));
+        // Not installed at all (the reviewer's case A): missing, and the run says so.
+        models.recognition = None;
+        let ocr = Ocr::load(&models).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((ocr.availability(ENGLISH), ocr.availability(fr)), (Availability::Missing, Availability::Ready));
+        assert!(matches!(ocr.check(ENGLISH), Err(OcrError::NoModels)) && ocr.check(fr).is_ok());
+        models.recognition = Some(dir.join(RECOGNITION_MODEL));
         models.latin = None;
         assert!(matches!(Ocr::load(&models), Err(OcrError::Load(..))));
         let _ = std::fs::remove_dir_all(&dir);

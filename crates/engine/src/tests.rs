@@ -4637,7 +4637,7 @@ fn a_language_without_its_model_is_read_as_english_and_says_so() {
     let (id, _) = synthetic_ocr_scan(&mut s);
     let read = |models: &ocr::Models, language: &str| {
         let ocr = ocr::engine_for(models).unwrap();
-        s.ocr_job(id, &[], ocr::OcrSettings { language: Some(language.into()), ..Default::default() }).unwrap().run(&ocr, |_, _| true)
+        s.ocr_job(id, &[], ocr::OcrSettings { language: Some(language.into()), ..Default::default() }).unwrap().run(&ocr, |_, _| true).unwrap()
     };
     let english_only = ocr::Models { latin: None, ..installed.clone() };
     let outcome = read(&english_only, "fr");
@@ -4661,11 +4661,56 @@ fn a_language_without_its_model_is_read_as_english_and_says_so() {
     s.apply(id, Edit::AddOcrText { page: 0, words: vec![earlier] }).unwrap();
     let ocr = ocr::engine_for(&english_only).unwrap();
     let job = s.ocr_job(id, &[], ocr::OcrSettings { language: Some("fr".into()), replace_ocr: true, ..Default::default() }).unwrap();
-    let outcome = job.run(&ocr, |_, _| true);
+    let outcome = job.run(&ocr, |_, _| true).unwrap();
     let kept = outcome.pages[0].skipped.as_ref().map(|k| k.kind);
     assert!(outcome.fallback.is_some() && kept == Some(ocr::SkipKind::KeptEarlierText) && outcome.pages[0].replaced.is_none(), "{outcome:?}");
     s.apply_ocr(id, &outcome.pages).unwrap();
     assert_eq!(page_texts(&s, id)[0], "Déjà", "the earlier text stays");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reviewer's defect: with the accented-Latin model installed but English's missing, or
+/// damaged, every page read as English failed, and a run, a file or a batch reported success
+/// with no words (and a damaged model showed as not installed). The run fails before reading a
+/// page, with why; the other languages are still read (needs the models; skipped without them).
+#[test]
+fn a_language_that_cannot_be_read_at_all_fails_the_run_with_why() {
+    let Some(installed) = ocr::Models::find().filter(|m| m.recognition.is_some() && m.latin.is_some()) else {
+        eprintln!("skipped: OCR models not installed");
+        return;
+    };
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let (id, _) = synthetic_ocr_scan(&mut s);
+    let bytes = s.get(id).unwrap().bytes.clone();
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-no-english-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let junk = dir.join(pdfcraft_ocr::RECOGNITION_MODEL);
+    std::fs::write(&junk, b"not a model").unwrap();
+    let not_installed = ocr::Models { recognition: None, ..installed.clone() };
+    let damaged = ocr::Models { recognition: Some(junk), ..installed };
+    for (models, why) in [(&not_installed, "not installed"), (&damaged, pdfcraft_ocr::RECOGNITION_MODEL)] {
+        let engine = ocr::engine_for(models).unwrap();
+        let job = |language: &str| s.ocr_job(id, &[], ocr::OcrSettings { language: Some(language.into()), ..Default::default() }).unwrap();
+        let mut pages_read = 0;
+        let e = job("en").run(&engine, |_, _| {
+            pages_read += 1;
+            true
+        });
+        assert!(matches!(&e, Err(e) if e.contains(why)), "{why}: {e:?}");
+        assert_eq!(pages_read, 0, "no page is read");
+        let fr = job("fr").run(&engine, |_, _| true).unwrap();
+        assert!(fr.fallback.is_none() && fr.pages[0].skipped.is_none() && fr.words() > 0, "{why}: {fr:?}");
+        // A file without /Lang is read in English: a file error, not a file with no words.
+        let file = ocr::recognize_file("scan.pdf", bytes.clone(), None, ocr::OcrSettings::default(), None, &engine, |_, _| true);
+        assert!(matches!(&file, Err(e) if e.contains(why)), "{why}: {:?}", file.map(|f| f.words()));
+        let fr = ocr::OcrSettings { language: Some("fr".into()), ..Default::default() };
+        assert!(ocr::recognize_file("scan.pdf", bytes.clone(), None, fr, None, &engine, |_, _| true).unwrap().words() > 0);
+    }
+    // A damaged model is not "not installed": English is unusable; French is read.
+    let states: Vec<_> = ocr::statuses(Some(&damaged)).into_iter().map(|(l, a)| (l.code, a)).take(2).collect();
+    assert_eq!(states, [("en", ocr::Availability::Unusable), ("fr", ocr::Availability::Ready)]);
+    let states: Vec<_> = ocr::statuses(Some(&not_installed)).into_iter().map(|(l, a)| (l.code, a)).take(2).collect();
+    assert_eq!(states, [("en", ocr::Availability::Missing), ("fr", ocr::Availability::Ready)]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

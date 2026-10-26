@@ -27,7 +27,10 @@ it.
 - `LANGUAGES`, `language(tag)` (a code or BCP 47 tag, by its primary subtag) and
   `first_language(tags)` (the first known one, else `ENGLISH`).
 - `availability(language)`, `Models::availability` and `Ocr::availability`: `Ready`,
-  `FallsBackToEnglish` (the language's model is missing, or failed to load) or `Missing`.
+  `FallsBackToEnglish` (the language's model is missing, or failed to load), `Unusable` (its
+  model failed to load and nothing else can read it; `Ocr` only) or `Missing`. `Ocr::check`
+  gives the error reading a language would give on every page, so a run can fail with it
+  before reading any.
 - `Ocr::recognize_in(pixels, width, height, language)` returns a `Recognition`: the lines, the
   language they were read as, and a `Fallback` (with a `FallbackReason`) when a language was
   read as English. `Ocr::recognize` reads English, as before.
@@ -40,8 +43,8 @@ that isn't the file PdfCraft ships (`LATIN_MODEL_SHA256`), or a dictionary that 
 doesn't belong with the model, makes that language fall back to English with the reason. Until
 that first load the file is judged by its presence alone, so `Ready` before a run means
 "installed", not "known to load". Likewise, an ocrs recognition model that fails to load leaves
-English unavailable (`Missing`, with the reason when it is read) while the PP-OCR model still
-reads the other languages; it is an error only when nothing else is installed.
+English `Unusable` (reading it fails with the reason) while the PP-OCR model still reads the
+other languages; loading is an error only when nothing else is installed.
 
 ## How `pp_ocr` reads a page
 

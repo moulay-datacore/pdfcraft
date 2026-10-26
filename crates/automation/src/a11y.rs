@@ -687,6 +687,7 @@ impl Automation {
                 let state = match a {
                     ocr::Availability::Ready => "ready",
                     ocr::Availability::FallsBackToEnglish => "falls_back_to_english",
+                    ocr::Availability::Unusable => "unusable",
                     ocr::Availability::Missing => "missing",
                 };
                 let reader = match l.reader {
