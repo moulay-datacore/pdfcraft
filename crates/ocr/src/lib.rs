@@ -929,6 +929,31 @@ mod tests {
         }
     }
 
+    /// The reviewer's defect: a receipt of short lines (one to three words each) scanned 6° or
+    /// 9° askew was laid at exactly 3°, the most a page's skew was guessed at when no long line
+    /// measured it, though every line agreed on the real skew. Its words follow the scan.
+    #[test]
+    fn a_page_of_short_lines_follows_its_real_skew() {
+        let Some(models) = installed("the accented-Latin model", |m| m.latin.is_some()) else { return };
+        let ocr = Ocr::load(&models).unwrap();
+        let fr = language("fr").unwrap();
+        let receipt = ["Café crème", "Thé vert", "Croissant", "Eau minérale", "Total à payer"];
+        for deg in [6.0, 9.0] {
+            let (w, h, px) = test_image::rendered(&receipt, deg);
+            let got = ocr.recognize_in(&px, w, h, fr).unwrap();
+            let words: Vec<&Word> = got.lines.iter().flat_map(|l| &l.words).collect();
+            let angle = |word: &Word| {
+                let [tl, tr, _, _] = word.quad;
+                (tr[1] - tl[1]).atan2(tr[0] - tl[0]).to_degrees()
+            };
+            eprintln!("{deg}°: {:?}", words.iter().map(|w| (w.text.as_str(), angle(w))).collect::<Vec<_>>());
+            assert!(words.len() >= 8, "{deg}°: {:?}", got.lines);
+            for word in &words {
+                assert!((angle(word) - deg as f32).abs() < 1.5, "{deg}°: {word:?} is at {}°", angle(word));
+            }
+        }
+    }
+
     /// A language whose model is missing, or damaged, is read as English, and the result says
     /// so; with no recognizer at all it is an error, never an empty page.
     #[test]

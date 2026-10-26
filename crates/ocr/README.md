@@ -49,9 +49,11 @@ reads the other languages; it is an error only when nothing else is installed.
    stops).
 2. Each part gets a direction: its own when it is long enough to measure and leans away from the
    page's skew by a degree or more (a stamp), the page's otherwise. The page's skew is the
-   lower median of the long lines within ±3° of level; more only when three or more long lines
-   agree on it and most of the page's lines lean that way; else the median of every line,
-   clamped to ±3°. One or two leaning lines (a stamp, a logo chained to a line) never set it.
+   lower median of the long lines within ±3° of level; more only when most of the page's lines
+   lean within 3° of it: three or more long lines agreeing on it, or, with no long line near
+   level (a receipt or a form of short lines), at least three lines in all. Otherwise it is the
+   median of every line, clamped to ±3°. One or two leaning lines (a stamp, a logo chained to a
+   line) never set it, and a page of only one or two short lines is read within ±3° of level.
 3. The part is cut out upright, 48 pixels high, and read in batches; greedy CTC decoding only
    emits characters the text layer can hold (WinAnsi), so nothing is written as `?`.
 4. Words are placed from their time steps and snapped to ocrs's detection boxes they overlap.
@@ -79,6 +81,9 @@ WinAnsi (Polish, Czech, Romanian, Turkish) needs a text layer in a Unicode font 
 ## Limits
 
 - No upside-down or vertical lines.
+- A page of one or two short lines (a label) scanned more than 3° askew is read at 3°: one or
+  two word boxes don't measure a skew well enough to trust more. On a page of short lines only,
+  the skew is their median, good to about a degree.
 - Faint text and stamps read poorly.
 - The PP-OCRv6 dictionary lacks `¡` and `„`; `’` is often read as `'`.
 - PP-OCR reading is about 1.6× slower than ocrs's, and the model adds about 21 MB to the

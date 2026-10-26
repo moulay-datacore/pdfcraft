@@ -18,9 +18,10 @@ const MIN_CROP_WIDTH: usize = 8;
 /// A long line follows the page's skew when its own angle is within this many degrees of it
 /// (one line's estimate is good to about 0.4°): a stamp, which leans its own way, keeps its own.
 const LINE_SKEW_TOLERANCE: f32 = 1.0;
-/// A page's skew is kept within this many degrees of level unless most of its lines agree on
-/// more ([`page_skew`]): one or two word boxes give an angle that can be ten degrees off, a stamp
-/// leans its own way, while scans are rarely skewed more than this.
+/// A page's skew is kept within this many degrees of level unless most of its lines, and at
+/// least [`MIN_AGREEING`], lean within this many degrees of more ([`page_skew`]): one or two
+/// word boxes give an angle that can be ten degrees off, and a stamp leans its own way, while
+/// scans are rarely skewed more than this. A short line's own angle is good to about this much.
 const MAX_GUESSED_SKEW: f32 = 3.0;
 
 /// A grey image, one byte per pixel, rows top to bottom.
@@ -175,27 +176,39 @@ fn lower_median(mut v: Vec<f32>) -> Option<f32> {
     v.get(v.len().saturating_sub(1) / 2).copied()
 }
 
-/// Long lines that must agree on a skew past [`MAX_GUESSED_SKEW`] before the page takes it.
+/// Lines that must agree on a skew past [`MAX_GUESSED_SKEW`] before the page takes it.
 const MIN_AGREEING: usize = 3;
+
+/// Whether most of `all` (the angles of a page's lines), and at least [`MIN_AGREEING`] of them,
+/// lean within [`MAX_GUESSED_SKEW`] of `m`.
+fn most_lean_with(all: &[f32], m: f32) -> bool {
+    let leaning = all.iter().filter(|a| (*a - m).abs() <= MAX_GUESSED_SKEW.to_radians()).count();
+    leaning >= MIN_AGREEING && leaning.saturating_mul(2) > all.len()
+}
 
 /// The page's skew, in radians, from its lines' directions. The long ("sure") lines within
 /// [`MAX_GUESSED_SKEW`] of level measure it best: their lower median. A skew past that is taken
-/// only when at least [`MIN_AGREEING`] long lines agree on it and most of the page's lines lean
-/// within [`MAX_GUESSED_SKEW`] of it (a page scanned askew), never from one or two long lines
-/// that lean their own way (a stamp, a tall logo chained to a line beside it) among short ones.
-/// Otherwise the median angle of every line, kept within [`MAX_GUESSED_SKEW`] of level.
+/// only when most of the page's lines lean with it (a page scanned askew): from the long lines
+/// when at least [`MIN_AGREEING`] of them agree on it, else, with no long line near level,
+/// from the median of every line. Never from one or two lines that lean their own way (a
+/// stamp, a tall logo chained to a line beside it) among the others, nor from a page of one or
+/// two short lines, whose angle comes from a word box or two: their median is kept within
+/// [`MAX_GUESSED_SKEW`] of level.
 fn page_skew(dirs: &[Option<Direction>]) -> Option<f32> {
     let limit = MAX_GUESSED_SKEW.to_radians();
     let all: Vec<f32> = dirs.iter().flatten().map(Direction::angle).filter(|a| a.is_finite()).collect();
     let sure: Vec<f32> = dirs.iter().flatten().filter(|d| d.sure).map(Direction::angle).filter(|a| a.is_finite()).collect();
     if let Some(m) = lower_median(sure.clone()).filter(|m| m.abs() > limit) {
         let agreeing = sure.iter().filter(|a| (*a - m).abs() < LINE_SKEW_TOLERANCE.to_radians()).count();
-        let leaning = all.iter().filter(|a| (*a - m).abs() <= limit).count();
-        if agreeing >= MIN_AGREEING && leaning.saturating_mul(2) > all.len() {
+        if agreeing >= MIN_AGREEING && most_lean_with(&all, m) {
             return Some(m);
         }
     }
-    lower_median(sure.into_iter().filter(|a| a.abs() <= limit).collect()).or_else(|| lower_median(all).map(|a| a.clamp(-limit, limit)))
+    if let Some(m) = lower_median(sure.into_iter().filter(|a| a.abs() <= limit).collect()) {
+        return Some(m);
+    }
+    let m = lower_median(all.clone())?;
+    Some(if most_lean_with(&all, m) { m } else { m.clamp(-limit, limit) })
 }
 
 /// The direction each line is read along. A scan is skewed as a whole, so the page's skew
@@ -464,6 +477,32 @@ pub(crate) mod tests {
         let got = line_directions(&dirs);
         assert!(got.iter().take(7).all(|d| (deg(d) - 6.0).abs() < 0.01), "{:?}", degs(&got));
         assert_eq!(got[7], None);
+    }
+
+    /// The reviewer's defect: a receipt or a form of short lines only, scanned more than
+    /// [`MAX_GUESSED_SKEW`] askew, was read at exactly that many degrees, though its lines
+    /// agreed on the real skew. Enough short lines leaning together set it; one or two don't.
+    #[test]
+    fn a_page_of_short_lines_takes_the_skew_they_agree_on() {
+        let deg = |d: &Option<[f32; 2]>| d.map_or(f32::NAN, |d| d[1].atan2(d[0]).to_degrees());
+        let degs = |got: &[Option<[f32; 2]>]| got.iter().map(deg).collect::<Vec<_>>();
+        let one = |deg: f32| direction(&oriented(&[word(100.0, 50.0, 60.0, 30.0, deg)]));
+        let two = |y: f32, deg: f32| direction(&oriented(&line_of(100.0, y, deg, &[0.0, 120.0], 100.0, 30.0)));
+        // As the real models measure a receipt scanned 6° askew: each line within 3° of it.
+        let got = line_directions(&[one(6.0), one(3.3), two(100.0, 4.8), two(200.0, 5.8), one(9.0)]);
+        assert!(got.iter().all(|d| (deg(d) - 5.8).abs() < 0.01), "{:?}", degs(&got));
+        let got = line_directions(&(0..6).map(|i| two(100.0 + 50.0 * i as f32, 9.0)).collect::<Vec<_>>());
+        assert!(got.iter().all(|d| (deg(d) - 9.0).abs() < 0.01), "{:?}", degs(&got));
+        // Two long lines (fewer than it takes on their own) and short lines, all at 6°.
+        let long = |y: f32| direction(&oriented(&line_of(100.0, y, 6.0, &[0.0, 200.0, 400.0, 600.0, 800.0], 150.0, 30.0)));
+        let got = line_directions(&[long(100.0), long(150.0), two(200.0, 6.0), two(250.0, 6.0), one(6.0)]);
+        assert!(got.iter().all(|d| (deg(d) - 6.0).abs() < 0.01), "{:?}", degs(&got));
+        // Two lines are too few to say the page is skewed past the limit.
+        let got = line_directions(&[two(100.0, 6.0), two(200.0, 6.0)]);
+        assert!(got.iter().all(|d| (deg(d) - MAX_GUESSED_SKEW).abs() < 0.01), "{:?}", degs(&got));
+        // Nor do three lines among more that disagree with them.
+        let got = line_directions(&[two(100.0, 0.0), two(150.0, 0.0), two(200.0, 0.0), two(250.0, 0.0), one(9.0), one(9.0), one(9.0)]);
+        assert!(got.iter().all(|d| deg(d).abs() < 0.01), "{:?}", degs(&got));
     }
 
     #[test]

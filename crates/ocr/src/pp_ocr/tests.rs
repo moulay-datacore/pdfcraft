@@ -179,6 +179,30 @@ fn a_leaning_stamp_does_not_tilt_the_short_lines() {
     assert!(read[3].words.iter().all(|wd| (angle_of(wd) - 20.0).abs() < 0.1), "{:?}", read[3]);
 }
 
+/// The reviewer's defect, through the recognizer: a page of short lines only (a receipt, a form)
+/// scanned 6° askew was cut out and laid at 3°, the most a page's skew was guessed at without a
+/// long line to measure it. Its lines agree on 6°, and are read along it.
+#[test]
+fn a_page_of_short_lines_is_read_at_the_skew_they_agree_on() {
+    let (w, h, deg) = (900usize, 700usize, 6.0f32);
+    let a = deg.to_radians();
+    let mut px = vec![255u8; w * h];
+    let mut lines: Vec<Vec<RotatedRect>> = Vec::new();
+    for y0 in [80.0f32, 180.0, 280.0, 380.0] {
+        let mut line = Vec::new();
+        for s in [0.0f32, 150.0] {
+            let (x, y) = (120.0 + s * a.cos(), y0 + s * a.sin());
+            bar(&mut px, w, (x, y), (100.0, 20.0), deg);
+            line.push(word(x, y, 106.0, 26.0, deg));
+        }
+        lines.push(line);
+    }
+    let img = Gray::new(&px, w, h).unwrap();
+    let read = reader().recognize(&img, &lines).unwrap();
+    assert_eq!(read.iter().map(|l| l.words.len()).collect::<Vec<_>>(), [2, 2, 2, 2], "{read:?}");
+    assert!(read.iter().flat_map(|l| &l.words).all(|wd| (angle_of(wd) - deg).abs() < 0.1 && wd.snapped), "{read:?}");
+}
+
 /// The verifier's defect: ocrs split a text line in two, the small "à" between the halves had
 /// no detection box of its own, and both halves' crops (each with its margin) read it, so the
 /// text layer said "à à Châlons". The same ink read twice is kept once.
