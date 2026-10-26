@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use pdfcraft_cos::{ObjRef, SaveOptions, write_incremental};
 use pdfcraft_render::{PageInfo, PageRenderer, RenderConfig, RenderRequest, RequestKind};
@@ -192,8 +192,19 @@ fn stamps(models: &Models) -> Vec<FileStamp> {
         .collect()
 }
 
-/// The recognisers loaded, newest last, each with the files it was loaded from.
+/// The recognisers loaded, newest last, each with the files it was loaded from. Held only to
+/// look one up or add one, never while models load, so [`statuses`] never waits for a load nor
+/// misses a recogniser because one is under way.
 static ENGINES: Mutex<Vec<(Vec<FileStamp>, Arc<Ocr>)>> = Mutex::new(Vec::new());
+
+/// Held while models load: two runs starting together load them once.
+static LOADING: Mutex<()> = Mutex::new(());
+
+/// The recogniser loaded from the files `key` stamps, if one is.
+fn loaded(key: &[FileStamp]) -> Option<Arc<Ocr>> {
+    let engines = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
+    engines.iter().find(|(k, _)| k.as_slice() == key).map(|(_, ocr)| ocr.clone())
+}
 
 /// The most recognisers kept loaded. One set of model files is the rule; another appears when the
 /// files change (models installed or replaced) or a caller names its own ([`engine_for`]).
@@ -216,20 +227,24 @@ pub fn engine_with(models: Option<&Models>) -> Result<Arc<Ocr>, String> {
 /// loaded the first time that language is read.
 pub fn engine_for(models: &Models) -> Result<Arc<Ocr>, String> {
     let key = stamps(models);
-    // Loaded under the lock: two runs starting together load the models once.
-    let mut loaded = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, ocr)) = loaded.iter().find(|(k, _)| *k == key) {
-        return Ok(ocr.clone());
+    if let Some(ocr) = loaded(&key) {
+        return Ok(ocr);
+    }
+    // One load at a time: of two runs starting together, the second finds the models loaded.
+    let _loading = LOADING.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(ocr) = loaded(&key) {
+        return Ok(ocr);
     }
     // The model files are untrusted (PDFCRAFT_MODELS can point anywhere): a panic while loading
     // them is an error, not a crash.
     let ocr = Arc::new(
         crate::guard(|| Ocr::load(models)).map_err(|p| format!("loading the text recognition models failed: {p}"))?.map_err(|e| e.to_string())?,
     );
-    if loaded.len() >= LOADED {
-        loaded.remove(0);
+    let mut engines = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
+    if engines.len() >= LOADED {
+        engines.remove(0);
     }
-    loaded.push((key, ocr.clone()));
+    engines.push((key, ocr.clone()));
     Ok(ocr)
 }
 
@@ -259,13 +274,8 @@ pub fn statuses(models: Option<&Models>) -> Vec<(&'static Language, Availability
             None => return LANGUAGES.iter().map(|l| (l, Availability::Missing)).collect(),
         },
     };
-    let key = stamps(models);
-    let loaded = match ENGINES.try_lock() {
-        Ok(engines) => engines.iter().find(|(k, _)| *k == key).map(|(_, o)| o.clone()),
-        Err(TryLockError::Poisoned(p)) => p.into_inner().iter().find(|(k, _)| *k == key).map(|(_, o)| o.clone()),
-        Err(TryLockError::WouldBlock) => None,
-    };
-    LANGUAGES.iter().map(|l| (l, loaded.as_ref().map_or_else(|| models.availability(l), |o| o.availability(l)))).collect()
+    let recogniser = loaded(&stamps(models));
+    LANGUAGES.iter().map(|l| (l, recogniser.as_ref().map_or_else(|| models.availability(l), |o| o.availability(l)))).collect()
 }
 
 /// Whether `language` can be read with the models [`Models::find`] finds ([`statuses`]).
