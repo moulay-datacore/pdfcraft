@@ -585,6 +585,78 @@ fn page_text(app: &PdfCraftApp) -> String {
     text.text.unwrap().plain_text()
 }
 
+/// A one-page PDF that is only a picture of a French sentence.
+fn french_scan() -> Vec<u8> {
+    let mut s = Session::new();
+    let text = s.create_from_text("t", "Le médecin à l'hôpital, garçon").unwrap();
+    let id = s.open("text.pdf", None, text, None).unwrap();
+    let png = export::Exporter::new(s.get(id).unwrap()).png(0, 200.0).unwrap();
+    s.create_from_images(&[("scan.png".into(), png)]).unwrap().to_vec()
+}
+
+/// The first page's text of the PDF file at `path`, as search and copy see it.
+fn file_text(path: &std::path::Path) -> String {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut r = pdfcraft_render::PageRenderer::new(std::sync::Arc::new(bytes), Default::default());
+    let text = r.render(pdfcraft_render::RenderRequest { page: 0, kind: pdfcraft_render::RequestKind::Text, scale: 1.0, ..Default::default() });
+    text.text.unwrap().plain_text()
+}
+
+/// The reviewer's gap: nothing checked which language the Action Wizard's Recognize text step
+/// and Recognize Text in many files read in, nor that they say so when it was read as English.
+/// Both read the user's pick, else each file's own language, else the interface's (these files
+/// name none), and say in the interface's language when a file was read as English (needs the
+/// English and accented-Latin models).
+#[test]
+fn actions_and_many_files_read_the_pick_else_the_interface_s_language() {
+    use pdfcraft_engine::actions::{Action, Step};
+    let Some(installed) = pdfcraft_engine::ocr::Models::find().filter(|m| m.recognition.is_some() && m.latin.is_some()) else {
+        eprintln!("skipped: the English and accented-Latin models are not installed");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-ui-wiring-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // With a French interface, `pick` and `models`: each way's text and result, the action's first.
+    let run = |out: std::path::PathBuf, pick: Option<&str>, models: &pdfcraft_engine::ocr::Models| -> [(String, String); 2] {
+        std::fs::create_dir_all(&out).unwrap();
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "fr").unwrap();
+        pdfcraft_ui_egui::i18n::set_current(pdfcraft_ui_egui::i18n::Lang::from_code("fr").unwrap());
+        if let Some(pick) = pick {
+            app.set_option("ocr-language", pick).unwrap();
+        }
+        app.ocr_models = Some(models.clone());
+        app.run_inline = true;
+        app.export_dir_override = Some(out.to_string_lossy().into_owned());
+        let searchable = Action { name: "Searchable".into(), description: String::new(), steps: vec![Step::RecognizeText], builtin: false };
+        app.run_action_on(searchable, vec![("action.pdf".into(), french_scan())]);
+        assert!(app.action_run.is_none(), "finished");
+        let action = app.toast.clone().unwrap().0;
+        app.use_files(pdfcraft_ui_egui::FilePurpose::Ocr, vec![("files.pdf".into(), french_scan())]);
+        assert!(app.ocr_batch.is_none(), "finished");
+        let files = app.toast.clone().unwrap().0;
+        [(file_text(&out.join("action.pdf")), action), (file_text(&out.join("files.pdf")), files)]
+    };
+    const READ_AS_ENGLISH: &str = "lu comme de l'anglais";
+    let english_only = pdfcraft_engine::ocr::Models { latin: None, ..installed.clone() };
+    let cases = [
+        ("the interface's language", None, &installed, true, false),
+        ("the pick before the interface's", Some("en"), &installed, false, false),
+        ("read as English, which it says", None, &english_only, false, true),
+    ];
+    // Every way and case that went wrong, so that one run shows them all.
+    let mut wrong = Vec::new();
+    for (i, (case, pick, models, accents, note)) in cases.into_iter().enumerate() {
+        for (way, (text, toast)) in ["action", "files"].into_iter().zip(run(dir.join(i.to_string()), pick, models)) {
+            if text.contains("médecin") != accents || toast.contains(READ_AS_ENGLISH) != note {
+                wrong.push(format!("{way}, {case}: {text:?} {toast}"));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// French through the dialog: read with its accents, then read again replacing the first
 /// reading in one undoable step (needs the accented-Latin model, `cargo xtask models`).
 #[test]
@@ -594,14 +666,7 @@ fn recognize_text_reads_french_and_replaces_its_own_earlier_text() {
         eprintln!("skipped: the French recognition model is not installed");
         return;
     }
-    let french = {
-        let mut s = Session::new();
-        let text = s.create_from_text("t", "Le médecin à l'hôpital, garçon").unwrap();
-        let id = s.open("text.pdf", None, text, None).unwrap();
-        let png = export::Exporter::new(s.get(id).unwrap()).png(0, 200.0).unwrap();
-        s.create_from_images(&[("scan.png".into(), png)]).unwrap().to_vec()
-    };
-    let mut h = recognize_dialog(french, None);
+    let mut h = recognize_dialog(french_scan(), None);
     open_language_picker(&mut h, "English");
     h.get_by_label("French").click();
     h.run_steps(4);
