@@ -5,6 +5,8 @@
 //! time (`[[fetched]]`). This gate fails when:
 //! - an asset-like file in the repository has no entry, or its SHA-256 is missing or differs
 //!   (translation catalogs are project files and carry none);
+//! - a file `cargo xtask models` fetches (an OCR model, its dictionary or licence text) is in
+//!   the repository anywhere: they are never committed;
 //! - a licence is not on the allowlist, or a declared licence file is missing;
 //! - an icon, image or font names Adobe as author or source, or an `adobe_data` entry is not on
 //!   the closed list approved in AGENTS.md §1.1;
@@ -59,6 +61,8 @@ pub const TRANSLATION_DIR: &str = "crates/ui-egui/src/i18n/";
 const ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "svg", "ico", "icns", "webp", "bmp", "tif", "tiff", "avif", "heic", "ttf", "otf", "ttc", "woff", "woff2", "pfb",
     "pfa", "afm", "icc", "icm", "pdf", "eps", "ps", "ai", "psd", "mp3", "wav", "ogg", "flac", "mp4", "mov", "webm", "cur", "ani", "brotli", "tsv",
+    // Trained models (the OCR models are fetched, never committed: [`check`] refuses them).
+    "onnx", "rten",
 ];
 
 #[derive(Deserialize, Default)]
@@ -287,8 +291,15 @@ pub fn check(root: &Path, m: &Manifest, repo_files: &[String], lock: &BTreeSet<(
             }
         }
     }
+    // The files `cargo xtask models` fetches: each model (and dictionary) and its licence text.
+    let fetched_model = |name: &str| {
+        m.fetched.iter().filter(|f| f.kind == "model").any(|f| name == f.file || name.strip_suffix(".LICENCE.txt") == Some(f.file.as_str()))
+    };
     for f in repo_files {
-        if is_asset_path(f) && !seen.contains(f) && root.join(f).is_file() {
+        let name = Path::new(f).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or_default();
+        if fetched_model(name) && root.join(f).is_file() {
+            problems.push(format!("{f}: OCR model files are fetched by `cargo xtask models`, never committed (AGENTS.md §1)"));
+        } else if is_asset_path(f) && !seen.contains(f) && root.join(f).is_file() {
             problems.push(format!("{f}: asset has no ATTRIBUTION.toml entry"));
         }
     }
@@ -379,7 +390,23 @@ pub fn models(args: &[String]) -> Result<()> {
         println!("models: {}", p.display());
     }
     std::fs::write(dir.join("ATTRIBUTION.txt"), models_attribution(&m))?;
+    if tracked_by_git(&root, &dir) {
+        eprintln!(
+            "models: warning: {} is inside the repository and not git-ignored: never commit these files (`cargo xtask assets` refuses them)",
+            dir.display()
+        );
+    }
     Ok(())
+}
+
+/// Whether files put in `dir` would be tracked by the git repository at `root`: `dir` is inside
+/// it and not ignored.
+fn tracked_by_git(root: &Path, dir: &Path) -> bool {
+    let abs = if dir.is_absolute() { dir.to_path_buf() } else { std::env::current_dir().map_or_else(|_| dir.to_path_buf(), |c| c.join(dir)) };
+    let Ok(rel) = abs.strip_prefix(root) else { return false };
+    // `git check-ignore` exits 0 for an ignored path and 1 for one that isn't.
+    // Asked about a file in it, as a directory pattern only matches with the trailing name.
+    Command::new("git").arg("check-ignore").arg("-q").arg(rel.join("model.onnx")).current_dir(root).status().is_ok_and(|s| s.code() == Some(1))
 }
 
 /// The credits shipped beside the models (their licences require attribution).
@@ -543,6 +570,44 @@ mod tests {
     fn unlisted_asset_is_rejected() {
         let p = check(&root(), &Manifest::default(), &["assets/icons/x.svg".into()], &lock(&[]));
         assert!(p.iter().any(|p| p.contains("no ATTRIBUTION.toml entry")), "{p:?}");
+    }
+
+    /// The reviewer's case: the models fetched into a folder other than the git-ignored
+    /// `assets/models` (or an ONNX test fixture) passed the gate once staged, since neither model
+    /// format counted as an asset. A model file needs an entry like any asset, and the fetched
+    /// OCR models, their dictionary and their licence texts are refused wherever they are.
+    #[test]
+    fn models_are_assets_and_fetched_models_are_never_committed() {
+        let root = root();
+        let m = load(&root).unwrap();
+        let dir = std::env::temp_dir().join(format!("pdfcraft-xtask-models-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str| {
+            std::fs::write(dir.join(name), b"x").unwrap();
+            format!("{}/{name}", dir.display())
+        };
+        for name in ["fixture.onnx", "other.RTEN"] {
+            let f = file(name);
+            let p = check(&root, &m, std::slice::from_ref(&f), &lock(&[]));
+            assert!(p.iter().any(|p| p.starts_with(&f) && p.contains("no ATTRIBUTION.toml entry")), "{name}: {p:?}");
+        }
+        for name in ["PP-OCRv6_small_rec.onnx", "ppocrv6_dict.txt", "text-detection.rten", "ppocrv6_dict.txt.LICENCE.txt"] {
+            let f = file(name);
+            let p = check(&root, &m, std::slice::from_ref(&f), &lock(&[]));
+            assert!(p.iter().any(|p| p.starts_with(&f) && p.contains("never committed")), "{name}: {p:?}");
+        }
+        // Other text files are not models.
+        let f = file("notes.txt");
+        assert!(!check(&root, &m, &[f], &lock(&[])).iter().any(|p| p.contains("never committed")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fetching_the_models_into_the_repository_warns_unless_git_ignores_them() {
+        let root = root();
+        assert!(!tracked_by_git(&root, &root.join("assets/models")));
+        assert!(tracked_by_git(&root, &root.join("crates/ocr/models")));
+        assert!(!tracked_by_git(&root, &std::env::temp_dir().join("models")));
     }
 
     #[test]
