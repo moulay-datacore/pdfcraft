@@ -19,6 +19,9 @@ kurbo = { workspace = true }
 # Display order of right-to-left lines in added text, and reading and writing order in Edit text;
 # already in the tree via the interface.
 unicode-bidi = "0.3"
+# The digest an OCR text layer records of what it held when written; already in the tree via
+# pdfcraft-cos (encryption).
+sha2 = "0.11"
 
 [dev-dependencies]
 hayro-syntax = { workspace = true }

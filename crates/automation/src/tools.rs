@@ -44,7 +44,7 @@ fn ocr_language() -> Value {
 fn replace_ocr() -> Value {
     json!({
         "type": "boolean",
-        "description": "Replace the OCR text PdfCraft added earlier (default false): a page that has some is read again, whatever skip_text_pages says, and the new text takes its place, in the same undoable step. A page where nothing is recognised, or that would be read as English instead of the language asked for (skip_kind kept_earlier_text), keeps it. Other text on the page, an OCR layer edited since included, is kept, and its words are not added again."
+        "description": "Replace the OCR text PdfCraft added earlier (default false): a page that has some is read again, whatever skip_text_pages says, and the new text takes its place, in the same undoable step. A page where nothing is recognised, or that would be read as English instead of the language asked for (skip_kind kept_earlier_text), keeps it. Other text on the page is kept and its words are not added again; so is OCR text edited since it was added (a word corrected with text_edit, even one left invisible), and a page skipped for having it says it was kept (skip_kind kept_earlier_text)."
     })
 }
 

@@ -6423,6 +6423,49 @@ fn ocr_recognize_reads_french_and_replaces_its_own_text() {
     assert_eq!(ok(&mut a, "edit_undo", json!({ "doc": scan }))["undone"], "Recognize text");
 }
 
+/// The acceptance defect through the tools: a word corrected with text_edit's line mode stays
+/// invisible OCR text in the layer, and ocr_recognize with replace_ocr dropped the correction. It
+/// is kept and the result says so. Reading again without replace_ocr points to it while the
+/// page's only text is PdfCraft's own OCR text, and not once that text is the user's (needs the
+/// OCR models; skipped without them).
+#[test]
+fn ocr_recognize_keeps_a_word_corrected_by_a_line_edit() {
+    let dir = workdir("ocr-corrected");
+    let mut a = auto(&dir);
+    if ok(&mut a, "ocr_status", json!({}))["available"] != true {
+        eprintln!("skipped: OCR models not installed");
+        return;
+    }
+    let text = ok(&mut a, "doc_create", json!({ "from": "text", "text": "Searchable scans with recognised words" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_images", json!({ "doc": text, "folder": "scan", "dpi": 150, "pages": [1] }));
+    let png = std::fs::read_dir(dir.join("scan")).unwrap().next().unwrap().unwrap().path();
+    let scan = ok(&mut a, "doc_create", json!({ "from": "images", "paths": [png.to_string_lossy()] }))["doc"].as_u64().unwrap();
+    assert!(ok(&mut a, "ocr_recognize", json!({ "doc": scan }))["words"].as_u64().unwrap() >= 4);
+    let again = ok(&mut a, "ocr_recognize", json!({ "doc": scan }));
+    assert_eq!(again["pages"][0]["skip_kind"], "has_text", "{again}");
+    let why = again["pages"][0]["skipped"].as_str().unwrap();
+    assert!(why.contains("only text is the OCR text PdfCraft added") && why.contains("replace_ocr"), "{again}");
+
+    let lines = ok(&mut a, "text_lines", json!({ "doc": scan, "page": 1 }));
+    assert!(lines["lines"].as_array().is_some_and(|l| !l.is_empty()), "{lines}");
+    ok(&mut a, "text_edit", json!({ "doc": scan, "page": 1, "line": 1, "text": "Corrected" }));
+    let find = |a: &mut Automation| ok(a, "text_find", json!({ "doc": scan, "query": "Corrected" }))["count"].as_u64().unwrap();
+    assert_eq!(find(&mut a), 1);
+
+    let replaced = ok(&mut a, "ocr_recognize", json!({ "doc": scan, "replace_ocr": true }));
+    assert_eq!((&replaced["replaced_pages"], &replaced["words"]), (&json!(0), &json!(0)), "{replaced}");
+    assert_eq!(replaced["pages"][0]["skip_kind"], "kept_earlier_text", "{replaced}");
+    let why = replaced["pages"][0]["skipped"].as_str().unwrap();
+    assert!(why.contains("edited") && why.contains("kept"), "{replaced}");
+    assert_eq!(find(&mut a), 1, "the correction stays");
+    let plain = ok(&mut a, "ocr_recognize", json!({ "doc": scan }));
+    assert_eq!(
+        (&plain["pages"][0]["skip_kind"], &plain["pages"][0]["skipped"]),
+        (&json!("has_text"), &json!("the page already contains text")),
+        "{plain}"
+    );
+}
+
 /// The reviewer's gap: no test saw a fallback reach a tool result. With the English models and
 /// no accented-Latin one, French is read as English and every OCR tool says so: language,
 /// fell_back_from and fallback_reason; replacing keeps the earlier text (skip_kind

@@ -640,7 +640,9 @@ fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag: &str, cont
             Isolation::TooDeep => return Err(too_deep_on_top()),
         }
     };
-    let mark_ref = doc.add(Object::Stream(Stream::flate(tagged(tag), &content)));
+    // An OCR text layer records what it holds, so a later change to its words can be told.
+    let dict = if tag == OCR_TAG { ocr_layer::layer_dict(&content) } else { tagged(tag) };
+    let mark_ref = doc.add(Object::Stream(Stream::flate(dict, &content)));
     let mark = Object::Ref(mark_ref);
     if behind {
         // Right after the backgrounds already there, so a new background is painted over the
@@ -699,9 +701,10 @@ fn place_inside_wrapper(doc: &mut Document, page: &pdfcraft_model::Page, tag: &s
 
 /// Draw `content` on top of a page (0-based) as permanent page content, with standard Helvetica
 /// available as `/PCHelv`. The stream is tagged `tag` (not a mark kind, so Remove never takes
-/// it away; an OCR text layer, tagged [`OCR_TAG`], is taken away only by
-/// [`remove_own_ocr_layers`]); the original content is wrapped in q/Q first. Used for applied
-/// redaction boxes and OCR text layers. Returns the new content stream.
+/// it away; an OCR text layer, tagged [`OCR_TAG`], also records the digest of its content, and
+/// is taken away only by [`remove_own_ocr_layers`] while that still matches); the original
+/// content is wrapped in q/Q first. Used for applied redaction boxes and OCR text layers.
+/// Returns the new content stream.
 pub fn stamp(doc: &mut Document, page: usize, tag: &str, content: Vec<u8>) -> Result<ObjRef, EditError> {
     let all = page_list(doc);
     check(&[page], all.len())?;
@@ -1035,7 +1038,7 @@ pub fn marks_present(doc: &Document) -> Vec<MarkKind> {
 mod background;
 pub use background::page_background;
 mod ocr_layer;
-pub use ocr_layer::{OCR_TAG, OcrLayers, own_ocr_layers, own_ocr_pages, remove_own_ocr_layers};
+pub use ocr_layer::{OCR_TAG, OcrLayers, OcrText, ocr_text_on, own_ocr_layers, own_ocr_pages, remove_own_ocr_layers};
 pub mod objects;
 pub use objects::{EditableObject, MAX_MOVE_OBJECTS, ObjectKind, ObjectTarget, editable_objects, move_objects};
 

@@ -777,7 +777,8 @@ impl PdfCraftApp {
                         msg.push_str(&format!(" ({})", why.chars().take(200).collect::<String>()));
                     }
                 }
-                // Why is in the fallback note that follows.
+                // Kept because it was edited since it was added, or because the language was
+                // read as English (the fallback note that follows says why).
                 if kept > 0 {
                     msg.push_str(&count(
                         kept,

@@ -130,6 +130,33 @@ fn an_edited_ocr_layer_is_not_replaced() {
     }
 }
 
+/// The acceptance defect: a word corrected with a line edit (text_edit's line mode) stays
+/// invisible text in the layer's own font, so the layer still looked like PdfCraft's OCR text
+/// and reading the page again with `replace_ocr` dropped the correction. It is the user's text
+/// now, kept, also once saved and opened again; undoing the correction makes it PdfCraft's again.
+#[test]
+fn a_word_corrected_by_a_line_edit_is_not_replaced() {
+    let (mut s, id) = scanned_with(vec![word("EMPLOYEE", 10.0, 60.0, 70.0), word("NAME", 64.0, 90.0, 70.0), word("Jonh", 120.0, 145.0, 70.0)]);
+    let lines = s.get(id).unwrap().text_lines(0);
+    let line = lines.iter().position(|l| l.text.trim() == "Jonh").unwrap_or_else(|| panic!("{lines:?}"));
+    s.apply(id, Edit::EditTextLine { page: 0, line, text: "John".into() }).unwrap();
+    let blocks = s.get(id).unwrap().text_blocks(0);
+    assert!(blocks.iter().any(|b| b.text == "John") && blocks.iter().all(|b| b.invisible), "still invisible OCR text");
+    assert_eq!(s.own_ocr_pages(id, &[]), Vec::<usize>::new(), "the corrected layer is the user's now");
+    let bytes = s.save_bytes(id).unwrap();
+    let reopened = s.open("corrected.pdf", None, bytes, None).unwrap();
+    assert_eq!(s.own_ocr_pages(reopened, &[]), Vec::<usize>::new(), "and stays so once saved");
+
+    s.apply(id, Edit::ReplaceOcrText { page: 0, words: vec![word("Again", 10.0, 40.0, 20.0)], replaces: Vec::new() }).unwrap();
+    let texts: Vec<String> = s.get(id).unwrap().text_blocks(0).iter().map(|b| b.text.clone()).collect();
+    for kept in ["EMPLOYEE NAME", "John", "Again"] {
+        assert!(texts.iter().any(|t| t == kept), "{kept:?} in {texts:?}");
+    }
+    s.undo(id).unwrap();
+    s.undo(id).unwrap();
+    assert_eq!(s.own_ocr_pages(id, &[]), [0], "without the correction, the layer is PdfCraft's again");
+}
+
 /// Several words of one OCR phrase rewrite as one line, without wrapping onto the line below.
 #[test]
 fn a_longer_ocr_phrase_grows_rightwards() {
