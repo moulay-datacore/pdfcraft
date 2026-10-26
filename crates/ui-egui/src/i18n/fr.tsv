@@ -1296,8 +1296,8 @@
 	This language's model isn't installed.	Le modèle de cette langue n'est pas installé.
 	Replace existing OCR text	Remplacer le texte OCR existant
 	Pages with text PdfCraft recognized before are read again, and the new text takes its place; other text on them stays	Les pages dont PdfCraft a déjà reconnu le texte sont relues, et le nouveau texte prend sa place ; le reste du texte de ces pages est conservé
-	; read as English: the {language} model isn't installed	; lu comme de l'anglais : le modèle « {language} » n'est pas installé
-	; read as English: the {language} model couldn't be loaded ({e})	; lu comme de l'anglais : le modèle « {language} » n'a pas pu être chargé ({e})
+	; read as English: the {language} model isn't installed	; lu comme de l'anglais : {language} — modèle non installé
+	; read as English: the {language} model couldn't be loaded ({e})	; lu comme de l'anglais : {language} — le modèle n'a pas pu être chargé ({e})
 	; replaced the earlier recognized text on 1 page	; texte reconnu auparavant remplacé sur 1 page
 	; replaced the earlier recognized text on {n} pages	; texte reconnu auparavant remplacé sur {n} pages
 	Settings	Réglages

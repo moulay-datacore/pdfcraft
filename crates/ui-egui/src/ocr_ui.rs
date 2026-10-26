@@ -35,11 +35,14 @@ pub struct OcrDraft {
     /// Replace the text PdfCraft recognized on these pages before ([`OcrSettings::replace_ocr`]).
     /// Offered only when one of the pages has some.
     pub replace: bool,
+    /// Whether the language was picked in the dialog since it opened: it becomes the user's
+    /// choice for every document once Recognize text is pressed, not on Cancel.
+    pub picked: bool,
 }
 
 impl Default for OcrDraft {
     fn default() -> Self {
-        OcrDraft { pages: OcrPages::All, from: 1, to: 1, language: "en".into(), dpi: 300, text_pages: false, replace: false }
+        OcrDraft { pages: OcrPages::All, from: 1, to: 1, language: "en".into(), dpi: 300, text_pages: false, replace: false, picked: false }
     }
 }
 
@@ -130,7 +133,6 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     let d = &mut app.ocr_draft;
     d.to = d.to.clamp(1, pages);
     d.from = d.from.clamp(1, d.to);
-    let mut picked = None;
     ui.label(egui::RichText::new(tl!("Recognize Text")).font(theme::semibold(18.0)));
     ui.add_space(8.0);
     let group = |ui: &mut egui::Ui, title: &str, body: &mut dyn FnMut(&mut egui::Ui)| {
@@ -162,7 +164,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
                 for (l, a) in &statuses {
                     if ui.selectable_label(d.language == l.code, language_label(l, *a)).clicked() {
                         d.language = l.code.to_string();
-                        picked = Some(l.code);
+                        d.picked = true;
                     }
                 }
             });
@@ -231,9 +233,10 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         })
     });
     // A language picked here is the user's choice from now on, for every document
-    // ([`pdfcraft_engine::Session::set_ocr_language`]); one the dialog opened with is not.
-    if let Some(code) = picked {
-        let _ = app.session.set_ocr_language(Some(code));
+    // ([`pdfcraft_engine::Session::set_ocr_language`]), once it is run; one the dialog opened with
+    // is not, and neither is one looked at and cancelled.
+    if go && app.ocr_draft.picked {
+        let _ = app.session.set_ocr_language(Some(&app.ocr_draft.language));
     }
     (go, cancel)
 }
@@ -291,11 +294,12 @@ impl PdfCraftApp {
         self.dialog = Some(crate::Dialog::RecognizeText);
     }
 
-    /// Set the Recognize Text language to the active document's default.
+    /// Set the Recognize Text language to the active document's default; nothing is picked yet.
     pub(crate) fn seed_ocr_language(&mut self) {
         if let Some((_, id)) = self.active_ids() {
             self.ocr_draft.language = self.ocr_language_for(id).code.to_string();
         }
+        self.ocr_draft.picked = false;
     }
 
     /// The pages of document `id` that have text PdfCraft recognized before, judged once per
@@ -341,23 +345,31 @@ impl PdfCraftApp {
     /// is one undoable step, "Recognize text", and is not run again for that page after Undo.
     pub(crate) fn auto_ocr_scanned_page(&mut self) {
         let Some(scan) = self.scan_to_read() else { return };
-        // Read in the document's default language (the user's last pick first), as the dialog
-        // would open with; one that can't be read at all leaves the page alone.
-        let language = self.ocr_language_for(scan.doc);
-        if self.ocr_statuses().iter().any(|(l, a)| *l == language && *a == Availability::Missing) {
+        let Some(settings) = self.auto_ocr_settings(scan.doc) else {
             self.views[scan.view].auto_ocr_skipped.insert(scan.page, scan.generation);
             return;
-        }
+        };
         self.views[scan.view].auto_ocr_tried.insert(scan.page);
-        // Only a page with no text of its own is read. Comments and text boxes over the picture do
-        // not count as its text (a scan with a few comments is still a scan, as in Acrobat), but
-        // a page with real text and a background picture is left alone.
+        self.start_ocr_pages(scan.doc, &[scan.page], settings, true);
+    }
+
+    /// The settings Edit reads a scanned page of document `doc` with: in the document's default
+    /// language (the user's last pick first), as the dialog would open with, whatever the dialog
+    /// was last left at; `None` when that language can't be read at all. Only a page with no text
+    /// of its own is read. Comments and text boxes over the picture do not count as its text (a
+    /// scan with a few comments is still a scan, as in Acrobat), but a page with real text and a
+    /// background picture is left alone.
+    fn auto_ocr_settings(&self, doc: DocId) -> Option<OcrSettings> {
+        let language = self.ocr_language_for(doc);
+        if self.ocr_statuses().iter().any(|(l, a)| *l == language && *a == Availability::Missing) {
+            return None;
+        }
         let mut settings = self.ocr_draft.settings();
         settings.language = Some(language.code.to_string());
         settings.skip_text_pages = true;
         settings.native_text_only = true;
         settings.replace_ocr = false;
-        self.start_ocr_pages(scan.doc, &[scan.page], settings, true);
+        Some(settings)
     }
 
     /// The page Edit should read now, if there is one: Edit is on outside Read mode with no dialog
@@ -990,9 +1002,11 @@ mod tests {
         assert_eq!(toast("en", None, false), "Recognized 1 word on 1 page");
         let missing = || Some(pdfcraft_engine::ocr::Fallback { from: french, reason: FallbackReason::NotInstalled });
         assert_eq!(toast("en", missing(), false), "Recognized 1 word on 1 page; read as English: the French model isn't installed");
+        // The reviewer's defect: "le modèle « Français »" capitalised the name mid-sentence. It
+        // stands as a label, as in the picker ("Français — lu comme de l'anglais").
         assert_eq!(
             toast("fr", missing(), false),
-            "1 mot reconnu sur 1 page; lu comme de l'anglais : le modèle « Français » n'est pas installé",
+            "1 mot reconnu sur 1 page; lu comme de l'anglais : Français — modèle non installé",
             "in the interface's language"
         );
         let damaged = Some(pdfcraft_engine::ocr::Fallback { from: french, reason: FallbackReason::Unusable("x".repeat(5_000)) });
@@ -1078,6 +1092,30 @@ mod tests {
         assert!(!tried("en", false, true), "English without its model");
         assert!(tried("fr", true, false), "French read as English (the result says so)");
         assert!(!tried("fr", false, false), "nothing installed");
+    }
+
+    /// The reviewer's gap: nothing checked the language Edit reads a scan in. It is the
+    /// document's default (the user's pick, else its /Lang, else the interface's), never what the
+    /// Recognize Text dialog was last left at.
+    #[test]
+    fn edit_reads_a_scan_in_the_document_s_language_not_the_dialog_s() {
+        let set_interface = interface;
+        let mut app = app_with(scan());
+        set_interface(&mut app, "fr");
+        app.ocr_models = Some(models(true, true));
+        let id = app.active_ids().unwrap().1;
+        app.ocr_draft.language = "en".into();
+        app.ocr_draft.replace = true;
+        let settings = app.auto_ocr_settings(id).unwrap();
+        assert_eq!(settings.language.as_deref(), Some("fr"), "the interface's language");
+        assert!(settings.skip_text_pages && settings.native_text_only && !settings.replace_ocr);
+        app.session.set_ocr_language(Some("de")).unwrap();
+        assert_eq!(app.auto_ocr_settings(id).unwrap().language.as_deref(), Some("de"), "the user's pick first");
+        set_interface(&mut app, "en");
+        app.ocr_models = Some(models(false, true));
+        assert_eq!(app.auto_ocr_settings(id).unwrap().language.as_deref(), Some("de"), "read as itself without English");
+        app.session.set_ocr_language(None).unwrap();
+        assert!(app.auto_ocr_settings(id).is_none(), "English can't be read at all");
     }
 
     #[test]

@@ -402,11 +402,41 @@ fn the_language_picker_says_which_languages_are_read_as_english() {
     h.get_by_label("French — read as English").click();
     h.run_steps(4);
     assert_eq!(h.state().ocr_draft.language, "fr");
-    assert_eq!(h.state().session.ocr_language().map(|l| l.code), Some("fr"), "the pick is remembered for later documents");
     assert!(h.query_by_label(READ_AS_ENGLISH).is_some(), "the note says so before the run");
     assert!(!recognize_disabled(&h), "it can still be read, as English");
+    h.get_by_label("Recognize text").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.ocr_language().map(|l| l.code), Some("fr"), "the pick, run, is remembered for later documents");
     let saved: serde_json::Value = serde_json::from_str(&h.state().persist()).unwrap();
     assert_eq!(saved["ocr_language"], "fr");
+}
+
+/// The reviewer's defect: a language looked at in the picker and then cancelled became the
+/// user's choice for every later document. Only one that is run is.
+#[test]
+fn a_language_picked_and_cancelled_is_not_remembered() {
+    let mut h = recognize_dialog(scan(), Some(models(true, true)));
+    open_language_picker(&mut h, "English");
+    h.get_by_label("German").click();
+    h.run_steps(4);
+    assert_eq!(h.state().ocr_draft.language, "de");
+    assert_eq!(h.state().session.ocr_language(), None, "not until it is run");
+    h.get_by_role_and_label(Role::Button, "Cancel").click();
+    h.run_steps(2);
+    assert!(h.state().dialog.is_none(), "closed");
+    assert_eq!(h.state().session.ocr_language(), None, "cancelled, it is not remembered");
+    let saved: serde_json::Value = serde_json::from_str(&h.state().persist()).unwrap();
+    assert!(saved["ocr_language"].is_null(), "{}", saved["ocr_language"]);
+
+    assert!(h.state_mut().execute("ocr.recognize"));
+    h.run_steps(2);
+    assert_eq!(h.state().ocr_draft.language, "en", "the dialog opens with the document's language again");
+    open_language_picker(&mut h, "English");
+    h.get_by_label("German").click();
+    h.run_steps(4);
+    h.get_by_label("Recognize text").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.ocr_language().map(|l| l.code), Some("de"), "run, it is remembered");
 }
 
 /// With only the accented-Latin model, English can't be read at all: it says so and Recognize
@@ -502,8 +532,15 @@ fn recognize_text_reads_french_and_replaces_its_own_earlier_text() {
     assert!(toast.starts_with("Recognized ") && toast.ends_with("on 1 page"), "{toast}");
     let read = page_text(h.state());
     assert!(read.contains("médecin") && read.contains("garçon") && !read.contains('?'), "{read}");
+    // A second, distinct OCR layer (a word an earlier run found in the margin), so replacing
+    // and undoing it can be told apart: "médecin" alone reads the same either way.
+    let id = h.state().active_ids().unwrap().1;
+    let margin = vec![pdfcraft_engine::ocr::PlacedWord { text: "Ancienne".into(), origin: [20.0, 20.0], across: [60.0, 0.0], up: [0.0, 10.0] }];
+    h.state_mut().session.apply(id, Edit::AddOcrText { page: 0, words: margin }).unwrap();
+    h.run_steps(2);
+    assert!(page_text(h.state()).contains("Ancienne"));
 
-    // Again, replacing the first reading.
+    // Again, replacing the earlier readings.
     assert!(h.state_mut().execute("ocr.recognize"));
     h.run_steps(2);
     assert_eq!(h.state().ocr_draft.language, "fr", "the pick is kept");
@@ -513,8 +550,15 @@ fn recognize_text_reads_french_and_replaces_its_own_earlier_text() {
     h.run_steps(3);
     let toast = h.state().toast.clone().unwrap().0;
     assert!(toast.ends_with("; replaced the earlier recognized text on 1 page"), "{toast}");
-    assert_eq!(page_text(h.state()).matches("médecin").count(), 1, "replaced, not added a second time");
+    let replaced = page_text(h.state());
+    assert_eq!(replaced.matches("médecin").count(), 1, "replaced, not added a second time: {replaced}");
+    assert!(!replaced.contains("Ancienne"), "both earlier layers are replaced: {replaced}");
     h.state_mut().undo();
     h.run_steps(2);
-    assert_eq!(page_text(h.state()).matches("médecin").count(), 1, "one undo brings the first reading back");
+    let undone = page_text(h.state());
+    assert_eq!(undone.matches("médecin").count(), 1, "{undone}");
+    assert!(undone.contains("Ancienne"), "one undo brings the earlier readings back: {undone}");
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert!(!page_text(h.state()).contains("Ancienne"), "and the one before is its own step");
 }
