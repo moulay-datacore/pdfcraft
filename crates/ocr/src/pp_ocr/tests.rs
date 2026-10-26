@@ -343,6 +343,49 @@ fn every_line_of_a_crowded_page_is_read_a_batch_at_a_time() {
     assert_eq!(largest.load(Ordering::Relaxed), MAX_BATCH * 3 * REC_HEIGHT * frame::MAX_WIDTH);
 }
 
+/// The batch memory cap: with a dictionary as large as PP-OCRv6's, a batch of long lines would
+/// make hundreds of megabytes of model output, so it holds as many lines as fit
+/// [`OUTPUT_BUDGET`], one when they are 4000 px wide; short lines still go [`MAX_BATCH`] at a
+/// time.
+#[test]
+fn a_batch_s_output_stays_within_the_budget() {
+    use std::sync::{Arc, Mutex};
+    /// Reads blanks, and keeps each batch's line count and output size.
+    struct Sizes(Arc<Mutex<Vec<(usize, usize)>>>, usize);
+    impl LineModel for Sizes {
+        fn run(&self, input: NdTensor<f32, 4>) -> Result<Output, String> {
+            let [n, _, _, w] = input.shape();
+            let (steps, classes) = (w / 8, self.1);
+            self.0.lock().unwrap().push((n, n * steps * classes));
+            let mut data = vec![0.0; n * steps * classes];
+            data.iter_mut().step_by(classes).for_each(|p| *p = 1.0);
+            Ok(Output { shape: [n, steps, classes], data })
+        }
+    }
+    // 20 000 entries, as many as PP-OCRv6's 18 708 and more.
+    let dict: String = (0x4E00u32..0x4E00 + 20_000).filter_map(char::from_u32).flat_map(|c| [c, '\n']).collect();
+    let cs = Charset::from_dict(&dict).unwrap();
+    let classes = cs.classes();
+    assert_eq!(classes, 20_002);
+    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let rec = Recognizer::with_model(Box::new(Sizes(Arc::clone(&sizes), classes)), cs).unwrap();
+    let px = vec![255u8; 3100 * 400];
+    let img = Gray::new(&px, 3100, 400).unwrap();
+    let rows = |n: usize, width: f32| -> Vec<Vec<RotatedRect>> {
+        (0..n).map(|i| vec![word(20.0 + width / 2.0, 15.0 + i as f32 * 30.0, width, 20.0, 0.0)]).collect()
+    };
+    sizes.lock().unwrap().clear();
+    rec.recognize(&img, &rows(4, 3000.0)).unwrap();
+    let long = sizes.lock().unwrap().clone();
+    assert_eq!(long.iter().map(|b| b.0).collect::<Vec<_>>(), [1, 1, 1, 1], "{long:?}");
+    assert!(long.iter().all(|b| b.1 <= OUTPUT_BUDGET), "{long:?}");
+    sizes.lock().unwrap().clear();
+    rec.recognize(&img, &rows(12, 150.0)).unwrap();
+    let short = sizes.lock().unwrap().clone();
+    assert_eq!(short.iter().map(|b| b.0).collect::<Vec<_>>(), [MAX_BATCH, 4], "{short:?}");
+    assert!(short.iter().all(|b| b.1 <= OUTPUT_BUDGET), "{short:?}");
+}
+
 #[test]
 fn batch_outputs_are_checked() {
     let px = page(400, 100, 50.0, 0.0, &[(50, 150), (200, 300)]);
@@ -411,6 +454,24 @@ mod onnx {
         bytes(2, &ty, &mut vi);
         vi
     }
+    /// A ModelProto whose graph holds a node whose attribute holds a graph, `depth` times over:
+    /// a few bytes a level, so 20 000 levels make a 234 KB file.
+    pub fn nested(depth: usize) -> Vec<u8> {
+        let mut graph = Vec::new();
+        for _ in 0..depth {
+            let mut attribute = Vec::new();
+            bytes(6, &graph, &mut attribute);
+            let mut node = Vec::new();
+            bytes(5, &attribute, &mut node);
+            graph.clear();
+            bytes(1, &node, &mut graph);
+        }
+        let mut m = Vec::new();
+        int(1, 6, &mut m);
+        bytes(7, &graph, &mut m);
+        m
+    }
+
     pub fn model(input: &[&str], output: &[&str], constant: &[u64]) -> Vec<u8> {
         let mut init = Vec::new();
         for d in constant {
@@ -451,7 +512,7 @@ fn models_are_checked_against_the_contract_and_the_dictionary() {
     let load = |name: &str, bytes: &[u8]| {
         let p = dir.join(name);
         std::fs::write(&p, bytes).unwrap();
-        Recognizer::load(&p, &dict).err()
+        Recognizer::load(&p, &dict, &sha256_hex(bytes)).err()
     };
     let good = ["N", "3", "48", "W"];
     let out = ["N", "T", "C"];
@@ -471,12 +532,44 @@ fn models_are_checked_against_the_contract_and_the_dictionary() {
     // A dictionary that isn't one is refused before the model is read.
     std::fs::write(&dict, "xy\n").unwrap();
     assert!(load("good2.onnx", &onnx::model(&good, &out, &[1, 40, 4])).unwrap().contains("dict.txt"));
-    assert!(Recognizer::load(&dir.join("missing.onnx"), &dir.join("missing.txt")).is_err());
+    assert!(Recognizer::load(&dir.join("missing.onnx"), &dir.join("missing.txt"), "").is_err());
     // Files over the cap are refused unread.
     let p = dir.join("big.bin");
     std::fs::write(&p, [0u8; 11]).unwrap();
     assert!(read_capped(&p, 10).unwrap_err().contains("larger"));
     assert_eq!(read_capped(&p, 11).unwrap().len(), 11);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reviewer's crash: rten's ONNX reader decodes nested graphs by plain recursion, so a small
+/// crafted file named like the model overflowed the stack, which aborts the process (no panic to
+/// catch) as soon as a language that needs the model was read. A file that isn't the one PdfCraft
+/// ships, byte for byte, is refused before rten sees it; so is a good model under another hash.
+/// Before the check, this test aborted the test binary ("has overflowed its stack").
+#[test]
+fn a_model_that_is_not_the_shipped_one_is_refused_before_it_is_parsed() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-pinned-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (model, dict) = (dir.join(crate::LATIN_MODEL), dir.join("d.txt"));
+    std::fs::write(&dict, "x\ny\n").unwrap();
+    // In a thread with a small stack, as the UI's OCR worker has, which overflows soonest.
+    let load = |bytes: &[u8]| {
+        std::fs::write(&model, bytes).unwrap();
+        let (model, dict) = (model.clone(), dict.clone());
+        std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(move || Recognizer::load(&model, &dict, crate::LATIN_MODEL_SHA256).err())
+            .unwrap()
+            .join()
+            .unwrap()
+    };
+    let deep = onnx::nested(20_000);
+    assert!(deep.len() < 300_000, "{}", deep.len());
+    let err = load(&deep).unwrap_or_else(|| panic!("a crafted model loaded"));
+    assert!(err.contains("not the model PdfCraft ships") && err.contains(&sha256_hex(&deep)), "{err}");
+    let good = onnx::model(&["N", "3", "48", "W"], &["N", "T", "C"], &[1, 40, 4]);
+    assert!(load(&good).is_some_and(|e| e.contains("SHA-256")), "a working model under another hash");
+    assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -489,7 +582,7 @@ fn a_loaded_model_reads_a_page() {
     std::fs::write(&model, onnx::model(&["N", "3", "48", "W"], &["N", "T", "C"], &[1, 40, 4])).unwrap();
     // "ł" is not in WinAnsi, so the text layer couldn't hold it: it is never emitted.
     std::fs::write(&dict, "x\nł\n").unwrap();
-    let rec = Recognizer::load(&model, &dict).unwrap();
+    let rec = Recognizer::load(&model, &dict, &sha256_hex(&std::fs::read(&model).unwrap())).unwrap();
     assert_eq!(rec.allowed_chars().collect::<String>(), "x ");
     let px = page(400, 100, 50.0, 0.0, &[(50, 150)]);
     let img = Gray::new(&px, 400, 100).unwrap();

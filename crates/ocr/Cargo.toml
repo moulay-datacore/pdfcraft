@@ -19,6 +19,8 @@ rten = { version = "0.26.0", default-features = false, features = ["rten_format"
 # The same versions ocrs uses, so its detection boxes and tensors are these crates' types.
 rten-imageproc = "0.26.0"
 rten-tensor = "0.26.0"
+# The PP-OCR model is checked against the SHA-256 of the file PdfCraft ships before rten parses it.
+sha2 = "0.11"
 thiserror.workspace = true
 
 [dev-dependencies]

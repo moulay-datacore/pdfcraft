@@ -35,27 +35,40 @@ it.
   around it. `PlacedWord::place` places the quad, so text on a skewed scan is laid skewed.
 - `text_layer` writes placed words as invisible Helvetica in WinAnsiEncoding.
 
-The PP-OCR recognizer is loaded the first time a language needs it, and checked then: a model or
-dictionary that is damaged, or that doesn't belong with the other, makes that language fall
-back to English with the reason.
+The PP-OCR recognizer is loaded the first time a language needs it, and checked then: a model
+that isn't the file PdfCraft ships (`LATIN_MODEL_SHA256`), or a dictionary that is damaged or
+doesn't belong with the model, makes that language fall back to English with the reason. Until
+that first load the file is judged by its presence alone, so `Ready` before a run means
+"installed", not "known to load". Likewise, an ocrs recognition model that fails to load leaves
+English unavailable (`Missing`, with the reason when it is read) while the PP-OCR model still
+reads the other languages; it is an error only when nothing else is installed.
 
 ## How `pp_ocr` reads a page
 
 1. ocrs's lines are split where two words are more than two word heights apart (columns, tab
    stops).
 2. Each part gets a direction: its own when it is long enough to measure and leans away from the
-   page's skew by a degree or more (a stamp), the page's otherwise (the median of the lines it
-   is sure of). With no sure line, the median of the guesses, clamped to ±3°.
+   page's skew by a degree or more (a stamp), the page's otherwise. The page's skew is the
+   lower median of the long lines within ±3° of level; more only when three or more long lines
+   agree on it and most of the page's lines lean that way; else the median of every line,
+   clamped to ±3°. One or two leaning lines (a stamp, a logo chained to a line) never set it.
 3. The part is cut out upright, 48 pixels high, and read in batches; greedy CTC decoding only
    emits characters the text layer can hold (WinAnsi), so nothing is written as `?`.
 4. Words are placed from their time steps and snapped to ocrs's detection boxes they overlap.
-   Then the same ink read in two crops is kept once, and a line that lies inside a longer line
-   (ocrs sometimes makes a few words a line of their own) joins it, in order.
+   Then the same ink read in two crops is kept once (the snapped word, else the one that holds
+   the other's text, else the more confident), and a line that lies on a longer line's baseline
+   (ocrs sometimes makes a few words a line of their own) joins it, in order. Lines beside a
+   tall box that ocrs chained into a line stay apart.
 
-Every input is untrusted. The model and dictionary files are size-capped, and checked against
-each other and against the model contract when loaded. Every output shape is checked. Lines are
-cut out and read a batch at a time, within a memory budget, so a crowded page is read in full. A
-panic inside ocrs or rten becomes an error for that page.
+Every input is untrusted. The PP-OCR model file must match the SHA-256 of the official file
+before rten parses it: rten's ONNX reader recurses without a depth limit and sizes some tensors
+from the graph, so a crafted file under that name could overflow the stack or exhaust memory,
+which abort the process (no panic to catch). The dictionary, which this crate parses itself, is
+size-capped, and it and the model are checked against each other and against the model contract
+when loaded. Every output shape is checked. Lines are cut out and read a batch at a time, within
+a memory budget, so a crowded page is read in full. A panic inside ocrs or rten becomes an error
+for that page; an abort does not, which is why the model is pinned. ocrs's own `.rten` models
+are loaded as before, unpinned (a separate, pre-existing surface).
 
 ## Adding a language
 

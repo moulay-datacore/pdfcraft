@@ -11,9 +11,13 @@
 //! - `C` is the dictionary's entries plus the blank and the space ([`dict`]).
 //!
 //! Every input is untrusted (the page pixels, and the model and dictionary files, which a user
-//! can point `PDFCRAFT_MODELS` at): the files are size-capped and checked against each other
-//! when loaded, every shape the model returns is checked, and lines are cut out and read a
-//! batch at a time, within a memory budget, so a crowded page is read in full.
+//! can point `PDFCRAFT_MODELS` at). The model file must be the one PdfCraft ships, byte for byte
+//! (its SHA-256), before rten parses it: rten's ONNX reader recurses without a depth limit and
+//! sizes some tensors from the graph, so a crafted file could overflow the stack or exhaust
+//! memory, which abort the process rather than panic. The dictionary, which PdfCraft's own code
+//! parses, is size-capped, and the two are checked against each other when loaded; every shape
+//! the model returns is checked, and lines are cut out and read a batch at a time, within a
+//! memory budget, so a crowded page is read in full.
 
 #![deny(clippy::indexing_slicing)]
 
@@ -28,6 +32,7 @@ use rten::Dimension;
 use rten_imageproc::RotatedRect;
 use rten_tensor::NdTensor;
 use rten_tensor::prelude::*;
+use sha2::{Digest, Sha256};
 
 use decode::{greedy, snap, spans, words_of};
 use dict::Charset;
@@ -114,6 +119,11 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// The SHA-256 of `bytes`, in lower-case hex.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Check what `model` declares about its input and output against the contract: one input
 /// `[N, 3, 48, W]` and one output `[N, T, classes]`. Dimensions the model leaves open pass;
 /// [`probe`] then checks what it returns.
@@ -179,13 +189,19 @@ pub(crate) fn decoding_charset(dict: &Path) -> Result<Charset, String> {
 }
 
 impl Recognizer {
-    /// Load the model at `model` (ONNX or .rten) and its dictionary at `dict`, and check that
-    /// they work together. Decoding is restricted to the characters the OCR text layer can hold
-    /// (Helvetica in WinAnsiEncoding), so recognised text is never written as `?`.
-    pub(crate) fn load(model: &Path, dict: &Path) -> Result<Recognizer, String> {
+    /// Load the model at `model` (ONNX or .rten), which must have the SHA-256 `sha256` (lower-case
+    /// hex), and its dictionary at `dict`, and check that they work together. A file with another
+    /// hash is refused before it is parsed (see the module documentation). Decoding is restricted
+    /// to the characters the OCR text layer can hold (Helvetica in WinAnsiEncoding), so recognised
+    /// text is never written as `?`.
+    pub(crate) fn load(model: &Path, dict: &Path, sha256: &str) -> Result<Recognizer, String> {
         let named = |p: &Path, e: String| format!("{}: {e}", p.display());
         let charset = decoding_charset(dict).map_err(|e| named(dict, e))?;
         let bytes = read_capped(model, MAX_MODEL_BYTES).map_err(|e| named(model, e))?;
+        let got = sha256_hex(&bytes);
+        if !got.eq_ignore_ascii_case(sha256) {
+            return Err(named(model, format!("not the model PdfCraft ships (its SHA-256 is {got}, not {sha256}), so it isn't read")));
+        }
         // From memory, so the model can't make the loader read other files (ONNX external data).
         let loaded = rten::Model::load(bytes).map_err(|e| named(model, e.to_string()))?;
         check_signature(&loaded, charset.classes()).map_err(|e| named(model, e))?;

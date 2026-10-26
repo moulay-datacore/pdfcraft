@@ -35,6 +35,10 @@ pub const RECOGNITION_MODEL: &str = "text-recognition.rten";
 /// newer model comes with new names and a mismatched pair can't be installed by accident.
 pub const LATIN_MODEL: &str = "PP-OCRv6_small_rec.onnx";
 pub const LATIN_DICT: &str = "ppocrv6_dict.txt";
+/// The SHA-256 of [`LATIN_MODEL`], as ATTRIBUTION.toml records it. Another file under that name
+/// is refused before it is parsed: rten's ONNX reader can be made to abort the process (a stack
+/// overflow, an allocation failure), which no error handling can catch.
+pub const LATIN_MODEL_SHA256: &str = "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634";
 
 /// The recognition model's alphabet, as it was trained (ocrs-models' `DEFAULT_ALPHABET`): its
 /// output classes follow this order. The ocrs crate's own copy has an `E` where the training had
@@ -335,19 +339,39 @@ pub struct Ocr {
     /// Finds words and lines; reads English when ocrs's recognition model is installed.
     engine: ocrs::OcrEngine,
     english: bool,
+    /// Why ocrs's recognition model, installed, failed to load (the file and the error): English
+    /// can't be read, and the other languages still can.
+    english_error: Option<(String, String)>,
     latin_files: Option<LatinModel>,
     latin: OnceLock<Result<pp_ocr::Recognizer, String>>,
 }
 
 impl Ocr {
+    /// Load the detection model and ocrs's recognition model. A recognition model that fails to
+    /// load leaves English unavailable ([`Ocr::availability`]) when the PP-OCR model is
+    /// installed, which reads the other languages, as a PP-OCR model that fails to load leaves
+    /// English; without it, it is the error.
     pub fn load(models: &Models) -> Result<Ocr, OcrError> {
-        let load = |p: &Path| rten::Model::load_file(p).map_err(|e| OcrError::Load(p.display().to_string(), e.to_string()));
-        let detection_model = Some(load(&models.detection)?);
-        let recognition_model = models.recognition.as_deref().map(load).transpose()?;
+        let load = |p: &Path| rten::Model::load_file(p).map_err(|e| (p.display().to_string(), e.to_string()));
+        let detection_model = Some(load(&models.detection).map_err(|(p, e)| OcrError::Load(p, e))?);
+        let (recognition_model, english_error) = match models.recognition.as_deref().map(load) {
+            None => (None, None),
+            Some(Ok(m)) => (Some(m), None),
+            Some(Err(e)) if models.latin.is_some() => (None, Some(e)),
+            Some(Err((p, e))) => return Err(OcrError::Load(p, e)),
+        };
         let english = recognition_model.is_some();
         let params = ocrs::OcrEngineParams { detection_model, recognition_model, alphabet: Some(ALPHABET.into()), ..Default::default() };
         let engine = ocrs::OcrEngine::new(params).map_err(|e| OcrError::Load("ocr engine".into(), e.to_string()))?;
-        Ok(Ocr { engine, english, latin_files: models.latin.clone(), latin: OnceLock::new() })
+        Ok(Ocr { engine, english, english_error, latin_files: models.latin.clone(), latin: OnceLock::new() })
+    }
+
+    /// The error for reading English when it can't be: its model failed to load, or isn't installed.
+    fn english_unavailable(&self) -> OcrError {
+        match &self.english_error {
+            Some((p, e)) => OcrError::Load(p.clone(), e.clone()),
+            None => OcrError::NoModels,
+        }
     }
 
     /// Load the models found by [`Models::find`].
@@ -355,8 +379,8 @@ impl Ocr {
         Self::load(&Models::find().ok_or(OcrError::NoModels)?)
     }
 
-    /// Whether `language` can be read as itself, as far as is known: a PP-OCR model that
-    /// failed to load counts as missing.
+    /// Whether `language` can be read as itself, as far as is known: a model that failed to load
+    /// counts as missing.
     pub fn availability(&self, language: &Language) -> Availability {
         let ready = match language.reader {
             Reader::Ocrs => self.english,
@@ -369,7 +393,7 @@ impl Ocr {
     fn latin(&self) -> Result<&pp_ocr::Recognizer, FallbackReason> {
         let files = self.latin_files.as_ref().ok_or(FallbackReason::NotInstalled)?;
         let loaded = self.latin.get_or_init(|| {
-            std::panic::catch_unwind(AssertUnwindSafe(|| pp_ocr::Recognizer::load(&files.model, &files.dict)))
+            std::panic::catch_unwind(AssertUnwindSafe(|| pp_ocr::Recognizer::load(&files.model, &files.dict, LATIN_MODEL_SHA256)))
                 .unwrap_or_else(|p| Err(format!("{}: {}", files.model.display(), panic_message(p.as_ref()))))
         });
         loaded.as_ref().map_err(|e| FallbackReason::Unusable(e.clone()))
@@ -389,7 +413,7 @@ impl Ocr {
                 language: ENGLISH,
                 fallback: Some(Fallback { from: language, reason }),
             }),
-            Err(FallbackReason::NotInstalled) => Err(OcrError::NoModels),
+            Err(FallbackReason::NotInstalled) => Err(self.english_unavailable()),
             Err(FallbackReason::Unusable(why)) => Err(OcrError::Load(format!("the {} recognition model", language.name), why)),
         }
     }
@@ -398,7 +422,7 @@ impl Ocr {
     /// with ocrs's recognition model.
     pub fn recognize(&self, pixels: &[u8], width: u32, height: u32) -> Result<Vec<Line>, OcrError> {
         if !self.english {
-            return Err(OcrError::NoModels);
+            return Err(self.english_unavailable());
         }
         guarded(|| self.read_english(pixels, width, height))
     }
@@ -750,6 +774,10 @@ mod tests {
                 .find(|e| e.contains(&format!("file = \"{file}\"")))
                 .unwrap_or_else(|| panic!("{file} is not in ATTRIBUTION.toml"));
             assert!(entry.contains("kind = \"model\""), "{file}: {entry}");
+            // The hash the PP-OCR model is checked against is the one the files are fetched by.
+            if file == LATIN_MODEL {
+                assert!(entry.contains(&format!("\nsha256 = \"{LATIN_MODEL_SHA256}\"")), "{file}: {entry}");
+            }
         }
     }
 
@@ -940,7 +968,35 @@ mod tests {
         let ocr = Ocr::load(&Models::find().unwrap()).unwrap();
         assert!(matches!(ocr.recognize(&[0; 16], u32::MAX, u32::MAX), Err(OcrError::BadImage)));
         assert!(matches!(ocr.recognize(&[0; 16], 2, 4), Err(OcrError::BadImage)));
-        assert!(matches!(ocr.recognize_in(&[0; 16], u32::MAX, u32::MAX, fr), Err(OcrError::TooLarge(_)) | Ok(_)));
+        // Read as French it is too large; read as English (its model missing), its pixels don't
+        // match its size. Either way it is refused.
+        assert!(matches!(ocr.recognize_in(&[0; 16], u32::MAX, u32::MAX, fr), Err(OcrError::TooLarge(_) | OcrError::BadImage)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reviewer's case: a damaged English model blocked every language, though the PP-OCR
+    /// model reads the others. English is unavailable, and says why; French is still read. Without
+    /// the PP-OCR model there is nothing left to read, and loading fails, as before.
+    #[test]
+    fn a_damaged_english_model_leaves_the_other_languages_readable() {
+        let Some(mut models) = installed("the accented-Latin model", |m| m.latin.is_some()) else { return };
+        let dir = std::env::temp_dir().join(format!("pdfcraft-ocr-damaged-en-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let damaged = dir.join(RECOGNITION_MODEL);
+        std::fs::write(&damaged, b"not a model").unwrap();
+        models.recognition = Some(damaged);
+        let ocr = Ocr::load(&models).unwrap_or_else(|e| panic!("{e}"));
+        let fr = language("fr").unwrap();
+        assert_eq!((ocr.availability(ENGLISH), ocr.availability(fr)), (Availability::Missing, Availability::Ready));
+        let (w, h, px) = test_image::rendered(&["Élève"], 0.0);
+        let got = ocr.recognize_in(&px, w, h, fr).unwrap();
+        assert_eq!((got.language, &got.fallback), (fr, &None));
+        assert!(got.lines.iter().any(|l| l.text().contains("Élève")), "{:?}", got.lines);
+        let why = ocr.recognize(&px, w, h).unwrap_err().to_string();
+        assert!(why.contains(RECOGNITION_MODEL), "{why}");
+        assert!(matches!(ocr.recognize_in(&px, w, h, ENGLISH), Err(OcrError::Load(..))));
+        models.latin = None;
+        assert!(matches!(Ocr::load(&models), Err(OcrError::Load(..))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
