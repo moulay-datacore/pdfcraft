@@ -1,8 +1,8 @@
 //! The OCR recogniser cache (`ocr::engine_for`, `ocr::statuses`) once a recogniser is loaded.
-//! Its own test binary module: no other test here loads a recogniser, and these take turns, so
-//! nothing evicts the one under test from the cache, which keeps a few. Synthetic files only.
+//! Each test holds the recognisers it checks, which the cache never drops while they are in use,
+//! so they run beside each other and any other test that loads models. Synthetic files only.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use pdfcraft_engine::ocr::{self, Availability, FallbackReason, LatinModel, Models, OcrSettings};
 use pdfcraft_engine::{Session, export};
@@ -13,7 +13,6 @@ use pdfcraft_engine::{Session, export};
 /// loads the models again and judges them afresh (needs the English models; skipped without).
 #[test]
 fn the_cache_remembers_a_damaged_model_and_reloads_a_changed_one() {
-    let _turn = TURNS.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(installed) = Models::find().filter(|m| m.recognition.is_some()) else {
         eprintln!("skipped: the English models are not installed");
         return;
@@ -50,9 +49,6 @@ fn the_cache_remembers_a_damaged_model_and_reloads_a_changed_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The tests here load recognisers, and the cache keeps only a few: one test at a time.
-static TURNS: Mutex<()> = Mutex::new(());
-
 /// What a loaded recogniser found shows while other models load. `statuses` (which the
 /// picker asks every frame) was told what the files alone say whenever a load held the cache,
 /// so a damaged English model showed as ready for as long as another set of models took to
@@ -60,7 +56,6 @@ static TURNS: Mutex<()> = Mutex::new(());
 /// the English and accented-Latin models; skipped without them).
 #[test]
 fn statuses_say_what_a_loaded_recogniser_found_while_other_models_load() {
-    let _turn = TURNS.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(installed) = Models::find().filter(|m| m.recognition.is_some() && m.latin.is_some()) else {
         eprintln!("skipped: the English and accented-Latin models are not installed");
         return;
@@ -71,7 +66,8 @@ fn statuses_say_what_a_loaded_recogniser_found_while_other_models_load() {
     let junk = dir.join("text-recognition.rten");
     std::fs::write(&junk, b"not a model").unwrap();
     let damaged = Models { recognition: Some(junk), ..installed.clone() };
-    ocr::engine_for(&damaged).unwrap();
+    // Held: the cache keeps a recogniser in use, whatever else loads.
+    let _held = ocr::engine_for(&damaged).unwrap();
     let english = || ocr::statuses(Some(&damaged)).into_iter().find(|(l, _)| *l == ocr::ENGLISH).map(|(_, a)| a);
     assert_eq!(english(), Some(Availability::Unusable), "the loaded recogniser found English damaged");
 

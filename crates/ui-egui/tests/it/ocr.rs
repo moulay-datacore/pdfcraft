@@ -507,6 +507,9 @@ fn a_damaged_english_model_fails_the_run_and_says_why() {
     let junk = dir.join(ENGLISH_MODEL);
     std::fs::write(&junk, b"not a model").unwrap();
     let damaged = pdfcraft_engine::ocr::Models { recognition: Some(junk), ..installed };
+    // The run's recogniser, held so that the cache keeps what it found for the picker below
+    // whatever other tests load meanwhile (it drops only recognisers no one uses).
+    let _held = pdfcraft_engine::ocr::engine_for(&damaged).unwrap();
     let mut h = recognize_dialog(scan(), Some(damaged.clone()));
     h.get_by_label("Recognize text").click();
     h.run_steps(3);

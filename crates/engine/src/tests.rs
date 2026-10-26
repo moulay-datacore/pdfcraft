@@ -4690,9 +4690,13 @@ fn a_language_that_cannot_be_read_at_all_fails_the_run_with_why() {
     let junk = dir.join(pdfcraft_ocr::RECOGNITION_MODEL);
     std::fs::write(&junk, b"not a model").unwrap();
     let not_installed = ocr::Models { recognition: None, ..installed.clone() };
-    let damaged = ocr::Models { recognition: Some(junk), ..installed };
+    let damaged = ocr::Models { recognition: Some(junk), ..installed.clone() };
+    // What a recogniser found shows in `statuses` while the cache has it, and the cache keeps
+    // the ones in use: these are held to the end.
+    let mut held = Vec::new();
     for (models, why) in [(&not_installed, "not installed"), (&damaged, pdfcraft_ocr::RECOGNITION_MODEL)] {
         let engine = ocr::engine_for(models).unwrap();
+        held.push(engine.clone());
         let job = |language: &str| s.ocr_job(id, &[], ocr::OcrSettings { language: Some(language.into()), ..Default::default() }).unwrap();
         let mut pages_read = 0;
         let e = job("en").run(&engine, |_, _| {
@@ -4709,11 +4713,21 @@ fn a_language_that_cannot_be_read_at_all_fails_the_run_with_why() {
         let fr = ocr::OcrSettings { language: Some("fr".into()), ..Default::default() };
         assert!(ocr::recognize_file("scan.pdf", bytes.clone(), None, fr, None, &engine, |_, _| true).unwrap().words() > 0);
     }
+    // The flake: beside other tests, the cache dropped the damaged recogniser to load their
+    // models, and English then showed as ready (judged by its file alone). As many other sets of
+    // models as the cache keeps load now (only the detection model is read; the others are
+    // named, not loaded, until a language needs them).
+    for i in 0..ocr::LOADED {
+        let elsewhere = |name: &str| dir.join(format!("elsewhere-{i}-{name}"));
+        let latin = ocr::LatinModel { model: elsewhere(pdfcraft_ocr::LATIN_MODEL), dict: elsewhere(pdfcraft_ocr::LATIN_DICT) };
+        ocr::engine_for(&ocr::Models { recognition: None, latin: Some(latin), ..installed.clone() }).unwrap();
+    }
     // A damaged model is not "not installed": English is unusable; French is read.
     let states: Vec<_> = ocr::statuses(Some(&damaged)).into_iter().map(|(l, a)| (l.code, a)).take(2).collect();
     assert_eq!(states, [("en", ocr::Availability::Unusable), ("fr", ocr::Availability::Ready)]);
     let states: Vec<_> = ocr::statuses(Some(&not_installed)).into_iter().map(|(l, a)| (l.code, a)).take(2).collect();
     assert_eq!(states, [("en", ocr::Availability::Missing), ("fr", ocr::Availability::Ready)]);
+    drop(held);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

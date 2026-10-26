@@ -200,9 +200,9 @@ fn stamps(models: &Models) -> Vec<FileStamp> {
         .collect()
 }
 
-/// The recognisers loaded, newest last, each with the files it was loaded from. Held only to
-/// look one up or add one, never while models load, so [`statuses`] never waits for a load nor
-/// misses a recogniser because one is under way.
+/// The recognisers loaded, oldest first, each with the files it was loaded from ([`make_room`]
+/// says which are kept). Held only to look one up or add one, never while models load, so
+/// [`statuses`] never waits for a load nor misses a recogniser because one is under way.
 static ENGINES: Mutex<Vec<(Vec<FileStamp>, Arc<Ocr>)>> = Mutex::new(Vec::new());
 
 /// Held while models load: two runs starting together load them once.
@@ -214,9 +214,24 @@ fn loaded(key: &[FileStamp]) -> Option<Arc<Ocr>> {
     engines.iter().find(|(k, _)| k.as_slice() == key).map(|(_, ocr)| ocr.clone())
 }
 
-/// The most recognisers kept loaded. One set of model files is the rule; another appears when the
-/// files change (models installed or replaced) or a caller names its own ([`engine_for`]).
-const LOADED: usize = 3;
+/// The most recognisers kept loaded that nothing else uses. One set of model files is the rule;
+/// another appears when the files change (models installed or replaced) or a caller names its own
+/// ([`engine_for`]).
+pub(crate) const LOADED: usize = 3;
+
+/// Make room in `engines` for one more: drop the oldest recognisers only the cache holds until
+/// fewer than [`LOADED`] are left. One in use (a run reading with it, a caller keeping it) stays
+/// whatever else loads: dropping it frees nothing while it is used, would load its models a
+/// second time, and would lose what it found (a model that failed to load), so that [`statuses`]
+/// would call a damaged model ready again. The cache holds more than [`LOADED`] only while more
+/// are in use.
+fn make_room<K, T>(engines: &mut Vec<(K, Arc<T>)>) {
+    while engines.len() >= LOADED {
+        // The lock on the cache is held: no one can take another handle on one only it holds.
+        let Some(unused) = engines.iter().position(|(_, ocr)| Arc::strong_count(ocr) == 1) else { break };
+        engines.remove(unused);
+    }
+}
 
 /// The recogniser for the models [`Models::find`] finds, loaded once (it takes a moment) and
 /// shared: see [`engine_for`].
@@ -249,9 +264,7 @@ pub fn engine_for(models: &Models) -> Result<Arc<Ocr>, String> {
         crate::guard(|| Ocr::load(models)).map_err(|p| format!("loading the text recognition models failed: {p}"))?.map_err(|e| e.to_string())?,
     );
     let mut engines = ENGINES.lock().unwrap_or_else(PoisonError::into_inner);
-    if engines.len() >= LOADED {
-        engines.remove(0);
-    }
+    make_room(&mut engines);
     engines.push((key, ocr.clone()));
     Ok(ocr)
 }
@@ -268,8 +281,9 @@ pub fn available_with(models: Option<&Models>) -> bool {
 
 /// Whether each of [`LANGUAGES`] can be read, in order, with `models` (the models
 /// [`Models::find`] finds when `None`): from the files installed and, once a recogniser for them
-/// is loaded, from whether each reader loaded. Cheap enough to ask every frame: it never waits
-/// for models being loaded.
+/// is loaded, from whether each reader loaded (for as long as the cache keeps it, which is always
+/// while it is in use: [`make_room`]). Cheap enough to ask every frame: it never waits for models
+/// being loaded.
 pub fn statuses(models: Option<&Models>) -> Vec<(&'static Language, Availability)> {
     let found;
     let models = match models {
@@ -965,6 +979,31 @@ mod tests {
         assert_eq!(latin.first(), Some(&("en", Missing)));
         assert!(latin.iter().skip(1).all(|(_, a)| *a == Ready), "{latin:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The flake behind `a_language_that_cannot_be_read_at_all_fails_the_run_with_why`: the cache
+    /// dropped its oldest recogniser to load another, even one still in use, so a test that had
+    /// found a model damaged saw it called ready once other tests had loaded their models. Only
+    /// recognisers nothing else holds make room, oldest first; with all in use, none goes (no
+    /// models needed: any value stands for a recogniser).
+    #[test]
+    fn the_cache_makes_room_only_with_recognisers_no_one_uses() {
+        let keys = |cache: &Vec<(usize, Arc<usize>)>| cache.iter().map(|(k, _)| *k).collect::<Vec<_>>();
+        let in_use = Arc::new(0);
+        let mut cache = vec![(0, in_use.clone()), (1, Arc::new(1)), (2, Arc::new(2))];
+        make_room(&mut cache);
+        assert_eq!(keys(&cache), [0, 2], "the oldest one no one uses goes; the one in use stays");
+        cache.push((3, Arc::new(3)));
+        make_room(&mut cache);
+        assert_eq!(keys(&cache), [0, 3]);
+        cache.push((4, Arc::new(4)));
+        let all_in_use: Vec<Arc<usize>> = cache.iter().map(|(_, o)| o.clone()).collect();
+        make_room(&mut cache);
+        assert_eq!(keys(&cache), [0, 3, 4], "all in use: none goes");
+        drop((all_in_use, in_use));
+        make_room(&mut cache);
+        assert_eq!(keys(&cache), [3, 4], "once they are let go, the oldest goes first");
+        make_room(&mut Vec::<(usize, Arc<usize>)>::new());
     }
 
     #[test]
